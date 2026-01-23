@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-LABEL maintainer="RHOAI QE Team"
+LABEL maintainer="TFA Contributors"
 LABEL description="TFA - AI-powered Test Failure Analyzer"
 LABEL version="2.0.0"
 

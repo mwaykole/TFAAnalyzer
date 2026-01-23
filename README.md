@@ -323,4 +323,4 @@ Apache 2.0 - See [LICENSE](LICENSE) for details.
 
 ## Support
 
-For issues or questions, contact the RHOAI QE team or open an issue in the repository.
+For issues or questions, open an issue in the repository.

@@ -47,7 +47,7 @@ CLI/API Request
 
 | Category | When Used | RP Defect Type |
 |----------|-----------|----------------|
-| **Product Bug** | Real defect in RHOAI/ODH | PB (pb001) |
+| **Product Bug** | Real defect in product | PB (pb001) |
 | **Test Automation Issue** | Problem in test code | AB (ab001) |
 | **Infrastructure Issue** | Cluster/env problem | SI (si001) |
 | **Flaky Test** | Intermittent failure | AB (ab_1kbn5su3gqpdt) |
