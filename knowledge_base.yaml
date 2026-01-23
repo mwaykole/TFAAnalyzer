@@ -1,0 +1,176 @@
+# =============================================================================
+# Knowledge Base - Domain-Specific Context for Test Failure Analysis
+# =============================================================================
+#
+# Add your domain knowledge, hints, and context here. These will be
+# automatically included in the LLM analysis to improve accuracy.
+#
+# HOW TO USE:
+# -----------
+# 1. Add context_hints for general knowledge the LLM should know
+# 2. Add quick_rules for immediate pattern-based classification
+# 3. Add platform_notes for platform-specific context
+#
+# The LLM will consider all this information when analyzing failures.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Context Hints - General domain knowledge for the LLM
+# -----------------------------------------------------------------------------
+# These are free-form notes that get injected into the LLM prompt.
+# Write them as if you're briefing a new QE engineer.
+
+context_hints:
+  # ARM Platform
+  - context: "ARM architecture tests"
+    hint: |
+      ARM (aarch64) tests often fail due to missing runtime support.
+      Many RHOAI components don't have ARM-compatible images yet.
+      ARM failures should usually be classified as SYSTEM ISSUE unless
+      there's a clear product bug in the logs.
+    keywords:
+      - "arm64"
+      - "aarch64"
+      - "ARM"
+      - "linux/arm64"
+
+  # GPU Tests
+  - context: "GPU-related tests"
+    hint: |
+      GPU tests require NVIDIA GPU nodes with proper drivers.
+      If no GPU nodes are available, these are SYSTEM ISSUE (infrastructure).
+      CUDA errors may indicate driver/hardware issues, not product bugs.
+    keywords:
+      - "GPU"
+      - "CUDA"
+      - "nvidia"
+      - "gpu-operator"
+
+  # Model Serving Timeouts
+  - context: "Model serving startup"
+    hint: |
+      Large models (LLMs, vLLM, TGI) can take 5-10 minutes to load.
+      Short timeouts (<5 min) for these are TEST AUTOMATION issues.
+      S3/MinIO credential failures are SYSTEM ISSUE (external service).
+    keywords:
+      - "vLLM"
+      - "TGI"
+      - "LLM"
+      - "model-mesh"
+
+  # CI Environment
+  - context: "CI/CD environment"
+    hint: |
+      Tests running on CI may hit resource limits or quota issues.
+      These should be classified as SYSTEM ISSUE, not product bugs.
+      Look for "quota exceeded", "resource limit", "insufficient" patterns.
+    keywords:
+      - "CI"
+      - "Jenkins"
+      - "Prow"
+      - "GitHub Actions"
+
+# -----------------------------------------------------------------------------
+# Quick Rules - Immediate pattern-based classification overrides
+# -----------------------------------------------------------------------------
+# These patterns, when matched, immediately classify the failure
+# without needing LLM analysis. Use for well-known failure patterns.
+
+quick_rules:
+  # ARM platform - no runtime support
+  - name: "ARM platform not supported"
+    pattern: "linux/arm64.*not.*found|no.*arm64.*image|arm64.*not.*supported"
+    classification: "system_issue"
+    reason: "ARM architecture not yet supported for this component"
+    severity: "low"
+    
+  # S3 credential issues - always external service
+  - name: "S3 authentication failure"
+    pattern: "storage-initializer.*exit.*code|InvalidAccessKeyId|AccessDenied.*S3"
+    classification: "system_issue"
+    reason: "S3/MinIO credentials misconfigured or expired"
+    severity: "high"
+    
+  # Known flaky components
+  - name: "Known flaky dashboard tests"
+    pattern: "dashboard.*StaleElementReference|dashboard.*timeout.*click"
+    classification: "automation_bug"
+    reason: "Dashboard UI tests need better wait conditions"
+    severity: "medium"
+
+# -----------------------------------------------------------------------------
+# Platform-Specific Notes
+# -----------------------------------------------------------------------------
+# Add notes for specific platforms, clusters, or environments
+
+platform_notes:
+  arm64:
+    status: "limited_support"
+    note: "ARM platform has limited runtime support. Most failures are expected."
+    default_classification: "system_issue"
+    
+  gpu:
+    status: "requires_hardware"
+    note: "Requires NVIDIA GPU nodes. Check cluster has GPU capacity."
+    
+  fips:
+    status: "compliance_mode"
+    note: "FIPS mode may cause crypto-related test failures due to algorithm restrictions."
+
+# -----------------------------------------------------------------------------
+# Component-Specific Context
+# -----------------------------------------------------------------------------
+# Additional context for specific test components
+
+component_context:
+  Model_server:
+    notes:
+      - "Large models can take 5-10 min to load"
+      - "S3 issues are SYSTEM ISSUE, not product bugs"
+      - "vLLM/TGI require significant memory"
+      
+  Dashboard:
+    notes:
+      - "UI tests are inherently flaky"
+      - "StaleElement errors are usually test issues"
+      - "Consider using explicit waits"
+      
+  Pipelines:
+    notes:
+      - "DSP v2 uses Argo, v1 uses Tekton"
+      - "Artifact storage issues are SYSTEM ISSUE"
+
+# -----------------------------------------------------------------------------
+# Team-Specific Overrides
+# -----------------------------------------------------------------------------
+# Add your team's specific knowledge here
+
+team_overrides:
+  # Example: Your team knows certain tests are always flaky
+  known_flaky_tests:
+    - test_pattern: "test_notebook_spawn.*large_image"
+      reason: "Large image pull can exceed default timeout"
+      recommended_action: "Increase timeout to 10 minutes"
+      
+  # Example: Temporarily ignore certain failures
+  temporary_ignores:
+    - pattern: "RHOAIENG-12345"
+      reason: "Known issue being fixed in next release"
+      jira: "RHOAIENG-12345"
+      expires: "2026-02-01"
+
+# -----------------------------------------------------------------------------
+# Settings
+# -----------------------------------------------------------------------------
+settings:
+  # Include context hints in LLM prompts
+  enabled: true
+  
+  # Max number of context hints to include (most relevant)
+  max_hints_per_analysis: 5
+  
+  # Apply quick_rules before LLM analysis
+  apply_quick_rules: true
+  
+  # Log when knowledge base is used
+  log_usage: true

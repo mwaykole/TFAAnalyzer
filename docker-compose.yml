@@ -1,0 +1,69 @@
+version: '3.8'
+
+# TFA Centralized Server for 30 QE Engineers
+# Uses ReportPortal as source of truth, Redis for shared caching
+
+services:
+  # TFA API Server
+  tfa-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tfa-api
+    ports:
+      - "8000:8000"
+    environment:
+      # ReportPortal Configuration
+      - RP_URL=${RP_URL:-https://reportportal.example.com}
+      - RP_PROJECT=${RP_PROJECT:-your-project}
+      - RP_USERNAME=${RP_USERNAME:-}
+      - RP_PASSWORD=${RP_PASSWORD:-}
+      - RP_VERIFY_SSL=${RP_VERIFY_SSL:-true}
+      
+      # Redis Cache
+      - REDIS_URL=redis://redis:6379
+      
+      # LLM Provider (optional - set API keys)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - tfa-network
+
+  # Redis Cache (shared across all users)
+  redis:
+    image: redis:7-alpine
+    container_name: tfa-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - tfa-network
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  tfa-network:
+    driver: bridge
