@@ -115,7 +115,7 @@ start_ui() {
     fi
     
     # Start UI dev server
-    npm run dev -- --host --port "$UI_PORT" > "$PROJECT_DIR/logs/ui.log" 2>&1 &
+    npm run dev > "$PROJECT_DIR/logs/ui.log" 2>&1 &
     local pid=$!
     echo $pid > "$PID_DIR/ui.pid"
     

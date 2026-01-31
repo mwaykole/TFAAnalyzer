@@ -15,22 +15,37 @@ class APIError extends Error {
   }
 }
 
-async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
+async function request<T>(endpoint: string, options?: RequestInit & { timeout?: number }): Promise<T> {
   const url = `${API_BASE}${endpoint}`
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  })
+  const timeout = options?.timeout || 300000 // 5 minute default timeout
+  
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    })
+    clearTimeout(timeoutId)
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
-    throw new APIError(response.status, error.detail || error.error || 'Request failed')
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
+      throw new APIError(response.status, error.detail || error.error || 'Request failed')
+    }
+
+    return response.json()
+  } catch (err) {
+    clearTimeout(timeoutId)
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new APIError(408, 'Request timeout - analysis is taking longer than expected')
+    }
+    throw err
   }
-
-  return response.json()
 }
 
 export const api = {
