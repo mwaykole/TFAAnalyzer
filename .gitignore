@@ -86,6 +86,12 @@ tfa_history.db
 *.sqlite
 *.db
 
+# PID files
+.pids/
+
+# Logs
+logs/
+
 # Claude/Cursor
 .claude/
 .cursor/
