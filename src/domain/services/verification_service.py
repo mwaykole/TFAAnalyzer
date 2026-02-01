@@ -24,6 +24,7 @@ class VerifyMode(str, Enum):
     NONE = "none"
     RUN_TEST = "run"
     ANALYZE_HISTORY = "analyze-history"
+    ALL = "all"  # Run both run_test and analyze_history
 
 
 @dataclass
@@ -105,7 +106,7 @@ class VerificationService:
         
         Args:
             test_name: Name of the test to verify
-            mode: Verification mode (run, analyze-history, none)
+            mode: Verification mode (run, analyze-history, all, none)
             logs: Original failure logs (for context)
             test_code: Test source code (for analysis)
             history: ReportPortal history data
@@ -126,10 +127,100 @@ class VerificationService:
         if mode == VerifyMode.ANALYZE_HISTORY:
             return await self.analyze_history(test_name, test_code, history)
         
+        if mode == VerifyMode.ALL:
+            return await self.verify_all(test_name, test_code, history)
+        
         return VerificationResult(
             mode=mode,
             status="error",
             reason=f"Unknown verification mode: {mode}",
+        )
+    
+    async def verify_all(
+        self,
+        test_name: str,
+        test_code: str = "",
+        history: dict[str, Any] | None = None,
+    ) -> VerificationResult:
+        """Run both run_test and analyze_history verifications.
+        
+        Combines results from both verification methods for comprehensive analysis.
+        
+        Args:
+            test_name: Name of test to verify
+            test_code: Test source code
+            history: ReportPortal history data
+            
+        Returns:
+            Combined VerificationResult
+        """
+        logger.info("running_combined_verification", test_name=test_name[:50])
+        
+        # Run both verifications in parallel
+        run_result, history_result = await asyncio.gather(
+            self.run_test(test_name),
+            self.analyze_history(test_name, test_code, history),
+            return_exceptions=True,
+        )
+        
+        # Handle exceptions
+        if isinstance(run_result, Exception):
+            run_result = VerificationResult(
+                mode=VerifyMode.RUN_TEST,
+                status="error",
+                reason=str(run_result),
+            )
+        if isinstance(history_result, Exception):
+            history_result = VerificationResult(
+                mode=VerifyMode.ANALYZE_HISTORY,
+                status="error",
+                reason=str(history_result),
+            )
+        
+        # Combine results
+        combined_details = {
+            "run_test": run_result.to_dict(),
+            "analyze_history": history_result.to_dict() if hasattr(history_result, 'to_dict') else {},
+        }
+        
+        # Determine combined status and confidence
+        # Priority: flaky > passed > failed > inconclusive
+        if run_result.status == "passed":
+            # Test passed on re-run, likely flaky
+            status = "flaky" if history_result.status in ("flaky", "needs_investigation") else "passed"
+            confidence = max(run_result.confidence, history_result.confidence)
+            reason = f"Re-run: {run_result.reason}; History: {history_result.reason}"
+        elif history_result.status == "flaky":
+            status = "flaky"
+            confidence = history_result.confidence
+            reason = f"Flaky based on history ({history_result.reason}). Re-run result: {run_result.status}"
+        elif run_result.status == "failed" and history_result.status == "consistent_fail":
+            status = "consistent_fail"
+            confidence = max(run_result.confidence, history_result.confidence)
+            reason = f"Consistent failure confirmed by both re-run and history analysis"
+        else:
+            # Use the more informative result
+            if history_result.confidence > run_result.confidence:
+                status = history_result.status
+                confidence = history_result.confidence
+                reason = f"History: {history_result.reason}; Re-run: {run_result.status}"
+            else:
+                status = run_result.status
+                confidence = run_result.confidence
+                reason = f"Re-run: {run_result.reason}; History: {history_result.status}"
+        
+        logger.info("combined_verification_complete",
+                    test_name=test_name[:30],
+                    status=status,
+                    run_status=run_result.status,
+                    history_status=history_result.status)
+        
+        return VerificationResult(
+            mode=VerifyMode.ALL,
+            status=status,
+            confidence=confidence,
+            reason=reason,
+            details=combined_details,
         )
     
     async def run_test(self, test_name: str) -> VerificationResult:
@@ -433,11 +524,39 @@ class VerificationService:
                 details=details,
             )
         
-        # Inconclusive
+        # Handle case of no history data specifically
+        if history.total_runs == 0:
+            # Check if we have any code analysis to help
+            if code.has_flaky_marker or code.has_xfail_marker:
+                return VerificationResult(
+                    mode=VerifyMode.ANALYZE_HISTORY,
+                    status="likely_flaky",
+                    confidence=0.65,
+                    reason=f"No execution history in ReportPortal, but code has flakiness markers ({', '.join(code.decorators[:3])})",
+                    details=details,
+                )
+            elif code.timing_issues:
+                return VerificationResult(
+                    mode=VerifyMode.ANALYZE_HISTORY,
+                    status="needs_investigation",
+                    confidence=0.55,
+                    reason=f"No execution history in ReportPortal. Code has timing patterns: {', '.join(code.timing_issues[:2])}",
+                    details=details,
+                )
+            else:
+                return VerificationResult(
+                    mode=VerifyMode.ANALYZE_HISTORY,
+                    status="no_history",
+                    confidence=0.40,
+                    reason="No execution history found in ReportPortal for this test. This may be a new test or the test name format differs across launches. Try 'Re-run Test' to verify if the failure is reproducible.",
+                    details=details,
+                )
+        
+        # Inconclusive - has some history but can't determine pattern
         return VerificationResult(
             mode=VerifyMode.ANALYZE_HISTORY,
             status="inconclusive",
             confidence=0.50,
-            reason="Insufficient data for pattern detection. Consider using --verify to run test.",
+            reason=f"Pattern unclear from {history.total_runs} runs ({history.pass_rate:.0%} pass rate). Consider using 'Re-run Test' to verify if failure is reproducible.",
             details=details,
         )

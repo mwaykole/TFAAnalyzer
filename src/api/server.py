@@ -91,7 +91,7 @@ def create_app() -> FastAPI:
     )
     
     # Import routes here to avoid circular imports
-    from src.api.routes import analyze, investigate, health, logs
+    from src.api.routes import analyze, investigate, health, logs, feedback
     from src.api.middleware.error_handler import ErrorHandlerMiddleware, RequestLoggingMiddleware
     
     # Add middlewares (order matters - first added = outermost)
@@ -103,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(analyze.router, prefix="/api/v1", tags=["Analysis"])
     app.include_router(investigate.router, prefix="/api/v1", tags=["Investigation"])
     app.include_router(logs.router, prefix="/api/v1", tags=["Logs"])
+    app.include_router(feedback.router, prefix="/api/v1", tags=["Feedback & Learning"])
     
     return app
 

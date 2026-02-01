@@ -37,6 +37,12 @@ class Evidence:
     wait_patterns: list[str] = field(default_factory=list)
     parametrize_args: list[str] = field(default_factory=list)
     
+    # Enhanced analysis fields
+    pre_error_context: str = ""  # WARNING/INFO logs before ERROR
+    timeout_analysis: str = ""   # Timeout verdict and recommendation
+    systemic_issue: str = ""     # Detected systemic issue from clustering
+    cluster_recommendation: str = ""  # Recommendation from cluster analysis
+    
     @property
     def has_strong_evidence(self) -> bool:
         """Check if there's strong evidence for classification."""
@@ -75,7 +81,7 @@ class Evidence:
     
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation."""
-        return {
+        result = {
             "error_message": self.error_message,
             "error_type": self.error_type,
             "patterns": self.patterns,
@@ -93,6 +99,16 @@ class Evidence:
             "wait_patterns": self.wait_patterns,
             "is_code_flaky": self.is_code_flaky,
         }
+        
+        # Add enhanced analysis fields if present
+        if self.pre_error_context:
+            result["pre_error_context"] = self.pre_error_context[:300]
+        if self.timeout_analysis:
+            result["timeout_analysis"] = self.timeout_analysis
+        if self.systemic_issue:
+            result["systemic_issue"] = self.systemic_issue
+        
+        return result
     
     def summary(self) -> str:
         """Generate evidence summary for display."""
@@ -107,6 +123,13 @@ class Evidence:
             parts.append("Code: flaky indicators")
         if self.fixtures:
             parts.append(f"Fixtures: {', '.join(self.fixtures[:3])}")
+        
+        # Enhanced analysis indicators
+        if self.systemic_issue:
+            parts.append(f"⚠️ Systemic: {self.systemic_issue[:30]}")
+        if self.timeout_analysis:
+            parts.append(f"⏱️ Timeout: {self.timeout_analysis[:30]}")
+        
         return " | ".join(parts) if parts else "No strong evidence"
     
     def code_analysis_summary(self) -> str:

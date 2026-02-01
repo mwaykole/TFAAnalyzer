@@ -303,47 +303,9 @@ class GitHubCodeFetcher(CodeFetcher):
         content: str,
         function_name: str,
     ) -> tuple[str | None, int | None, int | None]:
-        """Extract a specific function from Python source code."""
-        lines = content.split("\n")
-        pattern = rf"(?:async\s+)?def\s+{re.escape(function_name)}\s*\("
-        func_start = None
+        """Extract a specific function from Python source code.
         
-        for i, line in enumerate(lines):
-            if re.search(pattern, line):
-                func_start = i
-                break
-        
-        if func_start is None:
-            return None, None, None
-        
-        base_indent = len(lines[func_start]) - len(lines[func_start].lstrip())
-        func_end = len(lines)
-        
-        for i in range(func_start + 1, len(lines)):
-            line = lines[i]
-            stripped = line.lstrip()
-            
-            if not stripped or stripped.startswith("#"):
-                continue
-            
-            current_indent = len(line) - len(stripped)
-            
-            if current_indent <= base_indent and (
-                stripped.startswith("def ") or 
-                stripped.startswith("async def ") or
-                stripped.startswith("class ")
-            ):
-                func_end = i
-                break
-        
-        # Include decorators
-        decorator_start = func_start
-        for i in range(func_start - 1, -1, -1):
-            line = lines[i].strip()
-            if line.startswith("@"):
-                decorator_start = i
-            elif line and not line.startswith("#"):
-                break
-        
-        function_code = "\n".join(lines[decorator_start:func_end])
-        return function_code, decorator_start + 1, func_end
+        Delegates to shared utility to avoid code duplication.
+        """
+        from src.infrastructure.code_fetcher.utils import extract_function_from_source
+        return extract_function_from_source(content, function_name, include_decorators=True)

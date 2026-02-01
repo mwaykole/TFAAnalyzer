@@ -26,13 +26,39 @@ logger = get_logger(__name__)
 
 
 def _map_verify_mode(api_mode: VerifyModeEnum) -> VerifyMode:
-    """Map API enum to domain enum."""
+    """Map API enum to domain enum (legacy support)."""
     mapping = {
         VerifyModeEnum.NONE: VerifyMode.NONE,
         VerifyModeEnum.RUN: VerifyMode.RUN_TEST,
         VerifyModeEnum.ANALYZE_HISTORY: VerifyMode.ANALYZE_HISTORY,
+        VerifyModeEnum.ALL: VerifyMode.ALL,
     }
     return mapping.get(api_mode, VerifyMode.NONE)
+
+
+def _get_effective_verify_mode(request: InvestigateRequest) -> VerifyMode:
+    """Determine verification mode from request options.
+    
+    Supports both new checkbox-style (run_test, analyze_history) and 
+    legacy single-select (verify_mode).
+    """
+    # New checkbox-style takes precedence
+    if request.run_test and request.analyze_history:
+        return VerifyMode.ALL
+    elif request.run_test:
+        return VerifyMode.RUN_TEST
+    elif request.analyze_history:
+        return VerifyMode.ANALYZE_HISTORY
+    
+    # Fall back to legacy single-select
+    if request.verify_mode != VerifyModeEnum.NONE:
+        return _map_verify_mode(request.verify_mode)
+    
+    # Legacy verify_tests flag
+    if request.verify_tests:
+        return VerifyMode.RUN_TEST
+    
+    return VerifyMode.NONE
 
 
 @router.post("/investigate", response_model=InvestigateResponse)
@@ -49,13 +75,15 @@ async def investigate_failures(request: InvestigateRequest) -> InvestigateRespon
     - run: Actually execute the test using uv run pytest
     - analyze-history: Analyze pass/fail pattern from RP + test code
     """
-    verify_mode = _map_verify_mode(request.verify_mode)
+    verify_mode = _get_effective_verify_mode(request)
     
     logger.info("investigate_started",
                 launch_id=request.launch_id,
                 component=request.component,
                 provider=request.provider,
-                verify_mode=verify_mode.value)
+                verify_mode=verify_mode.value,
+                run_test=request.run_test,
+                analyze_history=request.analyze_history)
     
     rp_config = get_rp_config()
     cache = get_cache()
@@ -183,6 +211,30 @@ async def investigate_failures(request: InvestigateRequest) -> InvestigateRespon
                 details=result.verification_details.get("details", {}),
             )
         
+        # Build enhanced analysis schemas if present
+        from src.api.schemas.responses import TimeoutAnalysisSchema, ClusterInfoSchema
+        
+        timeout_analysis_schema = None
+        if result.timeout_analysis:
+            timeout_analysis_schema = TimeoutAnalysisSchema(
+                operation_type=result.timeout_analysis.get("operation_type", ""),
+                timeout_used=result.timeout_analysis.get("timeout_used", 0),
+                expected_min=result.timeout_analysis.get("expected_min", 0),
+                expected_max=result.timeout_analysis.get("expected_max", 0),
+                verdict=result.timeout_analysis.get("verdict", ""),
+                recommendation=result.timeout_analysis.get("recommendation", ""),
+            )
+        
+        cluster_info_schema = None
+        if result.cluster_info:
+            cluster_info_schema = ClusterInfoSchema(
+                cluster_id=result.cluster_info.get("cluster_id", ""),
+                likely_root_cause=result.cluster_info.get("likely_root_cause", ""),
+                category=result.cluster_info.get("category", ""),
+                recommendation=result.cluster_info.get("recommendation", ""),
+                affected_tests=result.cluster_info.get("affected_tests", 0),
+            )
+        
         investigation_results.append(InvestigationResult(
             test_name=result.test_name,
             test_id=result.test_id,
@@ -203,6 +255,11 @@ async def investigate_failures(request: InvestigateRequest) -> InvestigateRespon
             test_file=result.rca.test_file,
             code_analysis=result.rca.code_analysis,
             fixtures=result.rca.fixtures,
+            # Enhanced analysis fields
+            timeout_analysis=timeout_analysis_schema,
+            cluster_info=cluster_info_schema,
+            calibrated_confidence=result.calibrated_confidence,
+            confidence_explanation=result.confidence_explanation,
         ))
     
     return InvestigateResponse(

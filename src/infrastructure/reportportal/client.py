@@ -7,7 +7,7 @@ from typing import Any
 import aiohttp
 from aiohttp import BasicAuth, ClientTimeout
 
-from src.rp.models import (
+from src.infrastructure.reportportal.models import (
     Launch,
     LaunchStatus,
     LogEntry,

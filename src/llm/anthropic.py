@@ -13,7 +13,7 @@ from src.llm.base import (
     LLMRateLimitError,
     RateLimiter,
 )
-from src.rp.models import AnalysisResult, FailureClassification
+from src.infrastructure.reportportal.models import AnalysisResult, FailureClassification
 from src.utils.logging import get_logger
 from src.utils.retry import RetryConfig, async_retry
 

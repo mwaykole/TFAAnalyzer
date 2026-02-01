@@ -92,14 +92,18 @@ export interface AnalyzeRequest {
   provider: string
 }
 
-export type VerifyMode = 'none' | 'run' | 'analyze-history'
+export type VerifyMode = 'none' | 'run' | 'analyze-history' | 'all'
 
 export interface InvestigateRequest {
   launch_id: string
   component: string
   test_id?: string
   push_to_rp: boolean
-  verify_mode: VerifyMode
-  verify_tests?: boolean  // Legacy support
+  // New checkbox-style verification options
+  run_test: boolean
+  analyze_history: boolean
+  // Legacy support (deprecated)
+  verify_mode?: VerifyMode
+  verify_tests?: boolean
   provider: string
 }

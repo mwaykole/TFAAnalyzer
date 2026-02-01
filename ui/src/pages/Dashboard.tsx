@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom'
 import { 
   Search, 
-  Microscope, 
   BarChart3, 
   Zap,
   Server,
@@ -23,7 +22,7 @@ export function Dashboard() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Link
           to="/analyze"
           className="card p-6 hover:border-primary-300 hover:shadow-md transition-all group"
@@ -33,23 +32,10 @@ export function Dashboard() {
               <Search className="h-6 w-6" />
             </div>
             <div>
-              <h3 className="font-semibold text-gray-900">Quick Analysis</h3>
-              <p className="text-sm text-gray-500">Analyze test failures in a launch</p>
-            </div>
-          </div>
-        </Link>
-
-        <Link
-          to="/investigate"
-          className="card p-6 hover:border-purple-300 hover:shadow-md transition-all group"
-        >
-          <div className="flex items-center gap-4">
-            <div className="h-12 w-12 rounded-xl bg-purple-100 text-purple-600 flex items-center justify-center group-hover:bg-purple-200 transition-colors">
-              <Microscope className="h-6 w-6" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-gray-900">Deep Investigation</h3>
-              <p className="text-sm text-gray-500">Thinker-Critic RCA analysis</p>
+              <h3 className="font-semibold text-gray-900">Analyze Failures</h3>
+              <p className="text-sm text-gray-500">
+                Quick or deep analysis with AI-powered classification
+              </p>
             </div>
           </div>
         </Link>

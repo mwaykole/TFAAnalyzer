@@ -10,7 +10,7 @@ from typing import Any
 from src.domain.entities.failure import Failure
 from src.domain.entities.rca import RCA
 from src.domain.interfaces.repositories import FailureRepository, HistoryRepository
-from src.rp.client import ReportPortalClient
+from src.infrastructure.reportportal.client import ReportPortalClient
 
 
 AI_COMMENT_PREFIX = "🤖 AI:"
@@ -78,7 +78,7 @@ class RPRepository(FailureRepository, HistoryRepository):
         self, launch_id: str, component: str
     ) -> list[Failure]:
         """Get all failures for a component in a launch."""
-        from src.rp.component_fetcher import fetch_component_logs
+        from src.infrastructure.reportportal.component_fetcher import fetch_component_logs
         
         result = await fetch_component_logs(
             url=self._url,
@@ -185,7 +185,7 @@ class RPRepository(FailureRepository, HistoryRepository):
         self, test_name: str, days: int = 14
     ) -> dict[str, Any]:
         """Get historical pass/fail data for a test."""
-        from src.rp.test_history import fetch_test_history_by_name
+        from src.infrastructure.reportportal.test_history import fetch_test_history_by_name
         
         try:
             history = await fetch_test_history_by_name(

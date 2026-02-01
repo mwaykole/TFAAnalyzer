@@ -2,7 +2,6 @@ import { Link, useLocation } from 'react-router-dom'
 import { 
   LayoutDashboard, 
   Search, 
-  Microscope, 
   BarChart3,
   Activity,
   Menu,
@@ -20,7 +19,6 @@ interface LayoutProps {
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Analyze', href: '/analyze', icon: Search },
-  { name: 'Investigate', href: '/investigate', icon: Microscope },
   { name: 'Stats', href: '/stats', icon: BarChart3 },
 ]
 

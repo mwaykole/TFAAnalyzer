@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from src.rp.client import ReportPortalClient
-from src.rp.models import Launch, TestItem, TestStatus
+from src.infrastructure.reportportal.client import ReportPortalClient
+from src.infrastructure.reportportal.models import Launch, TestItem, TestStatus
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)

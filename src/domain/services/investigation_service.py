@@ -2,11 +2,16 @@
 
 Single Responsibility: Only handles deep investigation logic.
 Dependency Inversion: Depends on LLMProvider interface.
+
+Enhanced with:
+- Few-shot learning using similar past failures
+- Pre-error context inclusion
+- Enhanced evidence prompts
 """
 
 import asyncio
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.domain.entities.classification import Classification, FailureCategory, Severity
 from src.domain.entities.evidence import Evidence
@@ -15,6 +20,12 @@ from src.domain.entities.rca import RCA
 from src.domain.interfaces.llm_provider import LLMProvider
 from src.domain.services.classification_service import ClassificationService
 from src.utils.knowledge_base import get_knowledge_base, KnowledgeBaseMatch
+from src.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from src.infrastructure.embeddings.failure_store import FailureEmbeddingStore
+
+logger = get_logger(__name__)
 
 
 class InvestigationService:
@@ -22,19 +33,28 @@ class InvestigationService:
     
     Single Responsibility: Only handles investigation logic.
     Dependency Inversion: Depends on LLMProvider abstraction.
+    
+    Enhanced with few-shot learning using similar past failures.
     """
     
     def __init__(
         self,
         llm_provider: LLMProvider,
         classification_service: ClassificationService | None = None,
+        failure_store: "FailureEmbeddingStore | None" = None,
     ):
         """Initialize with LLM provider.
         
         Dependency Inversion: Accepts interface, not concrete implementation.
+        
+        Args:
+            llm_provider: LLM provider for analysis
+            classification_service: Optional classification service
+            failure_store: Optional embedding store for few-shot learning
         """
         self._llm = llm_provider
         self._classifier = classification_service or ClassificationService()
+        self._failure_store = failure_store
     
     async def investigate(
         self,
@@ -121,40 +141,96 @@ class InvestigationService:
         evidence: Evidence,
         kb_match: KnowledgeBaseMatch | None = None,
     ) -> str:
-        """Build prompt with evidence for Thinker."""
+        """Build prompt with evidence for Thinker.
+        
+        Enhanced with:
+        - Few-shot examples from similar past failures
+        - Pre-error context
+        - Enhanced analysis fields
+        """
+        prompt_parts = []
+        
+        # =========================================================
+        # ENHANCED: Add few-shot examples from similar past failures
+        # =========================================================
+        if self._failure_store:
+            try:
+                few_shot_section = self._failure_store.build_few_shot_prompt(
+                    test_name=failure.test_name,
+                    error_type=evidence.error_type or "UnknownError",
+                    error_message=evidence.error_message or failure.logs[:300],
+                    stack_trace=evidence.stack_trace or "",
+                    k=2,  # Include 2 similar examples
+                )
+                if few_shot_section:
+                    prompt_parts.append(few_shot_section)
+                    logger.debug("few_shot_examples_added", test_name=failure.test_name[:30])
+            except Exception as e:
+                logger.warning("few_shot_failed", error=str(e))
+        
         # Base prompt with failure details
-        prompt = f"""Analyze this failure:
+        prompt_parts.append(f"""Analyze this failure:
 
 TEST: {failure.test_name}
 ERROR: {evidence.error_type}: {evidence.error_message[:300]}
 PATTERNS: {', '.join(evidence.patterns) or 'None detected'}
-STACK: {evidence.stack_trace[:400] if evidence.stack_trace else 'N/A'}
+STACK: {evidence.stack_trace[:500] if evidence.stack_trace else 'N/A'}
 DECORATORS: {', '.join(evidence.decorators[:5]) or 'None'}
-"""
+""")
+        
+        # =========================================================
+        # ENHANCED: Add pre-error context if available
+        # =========================================================
+        if hasattr(evidence, 'pre_error_context') and evidence.pre_error_context:
+            prompt_parts.append(f"""
+CONTEXT (logs before error):
+{evidence.pre_error_context[:400]}
+""")
+        
+        # =========================================================
+        # ENHANCED: Add timeout analysis if available
+        # =========================================================
+        if hasattr(evidence, 'timeout_analysis') and evidence.timeout_analysis:
+            prompt_parts.append(f"""
+TIMEOUT ANALYSIS: {evidence.timeout_analysis}
+""")
+        
+        # =========================================================
+        # ENHANCED: Add systemic issue context if detected
+        # =========================================================
+        if hasattr(evidence, 'systemic_issue') and evidence.systemic_issue:
+            prompt_parts.append(f"""
+⚠️ SYSTEMIC ISSUE DETECTED: {evidence.systemic_issue}
+This failure is likely part of a broader infrastructure issue affecting multiple tests.
+Recommendation: {getattr(evidence, 'cluster_recommendation', 'Investigate infrastructure')}
+""")
         
         # Add knowledge base context if available
         if kb_match:
             kb_context = kb_match.get_context_for_llm()
             if kb_context:
-                prompt += f"""
+                prompt_parts.append(f"""
 {kb_context}
 
 IMPORTANT: Consider the domain knowledge above when classifying this failure.
-"""
+""")
         
-        prompt += """
+        prompt_parts.append("""
 Classifications:
 1. Product Bug - RHOAI/ODH component defect
 2. Test Automation Issue - Test code problem
 3. Infrastructure Issue - Cluster/environment problem  
 4. Intermittent Failure - Timing/flaky issue
 
-Provide: classification, specific root cause, confidence %."""
+Provide: classification, specific root cause, confidence %.""")
         
-        return prompt
+        return "\n".join(prompt_parts)
     
     async def _prepare_context(self, evidence: Evidence) -> str:
-        """Prepare context for Critic (runs in parallel with Thinker)."""
+        """Prepare context for Critic (runs in parallel with Thinker).
+        
+        Enhanced with additional analysis context.
+        """
         context_parts = []
         
         if evidence.historical_failures > 0:
@@ -169,7 +245,49 @@ Provide: classification, specific root cause, confidence %."""
         if evidence.verification_result != "not_run":
             context_parts.append(f"Verification: {evidence.verification_result}")
         
+        # Enhanced: Add systemic issue context
+        if hasattr(evidence, 'systemic_issue') and evidence.systemic_issue:
+            context_parts.append(f"Systemic issue: {evidence.systemic_issue[:50]}")
+        
+        # Enhanced: Add timeout context
+        if hasattr(evidence, 'timeout_analysis') and evidence.timeout_analysis:
+            context_parts.append(f"Timeout: {evidence.timeout_analysis[:50]}")
+        
         return " | ".join(context_parts) if context_parts else "No additional context"
+    
+    def store_result(
+        self,
+        failure: Failure,
+        evidence: Evidence,
+        rca: RCA,
+    ) -> None:
+        """Store investigation result for future few-shot learning.
+        
+        Args:
+            failure: The analyzed failure
+            evidence: Evidence used for analysis
+            rca: The RCA result
+        """
+        if not self._failure_store:
+            return
+        
+        try:
+            self._failure_store.store(
+                test_id=failure.id,
+                test_name=failure.test_name,
+                error_type=evidence.error_type or "UnknownError",
+                error_message=evidence.error_message or "",
+                classification=rca.classification.category.value,
+                root_cause=rca.root_cause,
+                reasoning=rca.reasoning,
+                confidence=rca.confidence,
+                stack_trace=evidence.stack_trace or "",
+            )
+            logger.debug("result_stored_for_learning",
+                         test_name=failure.test_name[:30],
+                         classification=rca.classification.category.value)
+        except Exception as e:
+            logger.warning("failed_to_store_result", error=str(e))
     
     def _parse_rca_response(
         self,

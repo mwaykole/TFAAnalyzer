@@ -1,8 +1,16 @@
-"""RCA Investigator using Thinker-Critic pattern with LLM reasoning."""
+"""RCA Investigator using Thinker-Critic pattern with LLM reasoning.
+
+DEPRECATED: This module is maintained for backward compatibility.
+For new code, use:
+    - src.application.use_cases.investigate_rca.InvestigateRCAUseCase
+    - src.domain.services.investigation_service.InvestigationService
+    - src.domain.entities.rca.RCA
+"""
 
 import asyncio
 import re
 import hashlib
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,6 +18,13 @@ from src.llm.base import LLMProvider
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Emit deprecation warning on first use
+warnings.warn(
+    "src.investigator is deprecated. Use src.application.use_cases.investigate_rca instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 # RHOAI Domain Knowledge
 RHOAI_CONTEXT = """

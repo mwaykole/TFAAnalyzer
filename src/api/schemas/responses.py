@@ -70,8 +70,29 @@ class VerificationDetailsSchema(BaseModel):
     details: dict = Field(default_factory=dict, description="Additional verification details")
 
 
+class TimeoutAnalysisSchema(BaseModel):
+    """Timeout analysis details."""
+    
+    operation_type: str = Field("", description="Type of operation that timed out")
+    timeout_used: int = Field(0, description="Timeout value used (seconds)")
+    expected_min: int = Field(0, description="Expected minimum timeout")
+    expected_max: int = Field(0, description="Expected maximum timeout")
+    verdict: str = Field("", description="Verdict: too_short, within_range, too_long")
+    recommendation: str = Field("", description="Recommendation based on analysis")
+
+
+class ClusterInfoSchema(BaseModel):
+    """Cluster/systemic issue information."""
+    
+    cluster_id: str = Field("", description="Cluster identifier")
+    likely_root_cause: str = Field("", description="Likely root cause")
+    category: str = Field("", description="Issue category")
+    recommendation: str = Field("", description="Recommendation")
+    affected_tests: int = Field(0, description="Number of affected tests")
+
+
 class InvestigationResult(BaseModel):
-    """Single investigation result."""
+    """Single investigation result with enhanced analysis."""
     
     test_name: str = Field(..., description="Name of the test")
     test_id: str = Field(..., description="Test item ID")
@@ -83,11 +104,18 @@ class InvestigationResult(BaseModel):
     verified: bool = Field(False, description="Whether verification was performed")
     verification_result: str = Field("not_run", description="Verification status")
     verification_details: VerificationDetailsSchema | None = Field(None, description="Full verification details")
+    
     # Code fetcher fields
     github_url: str = Field("", description="GitHub URL to test source")
     test_file: str = Field("", description="Test file path")
     code_analysis: str = Field("", description="Code analysis summary")
     fixtures: list[str] = Field(default_factory=list, description="Test fixtures used")
+    
+    # Enhanced analysis fields
+    timeout_analysis: TimeoutAnalysisSchema | None = Field(None, description="Timeout analysis if applicable")
+    cluster_info: ClusterInfoSchema | None = Field(None, description="Systemic issue info if detected")
+    calibrated_confidence: float | None = Field(None, description="Calibrated confidence score")
+    confidence_explanation: str | None = Field(None, description="Confidence calibration explanation")
 
 
 class InvestigateResponse(BaseModel):

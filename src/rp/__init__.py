@@ -1,44 +1,45 @@
-"""ReportPortal API client and utilities."""
+"""ReportPortal module - DEPRECATED.
 
-from src.rp.client import ReportPortalClient, AuthenticationError
-from src.rp.models import (
+This module is deprecated. Please import from:
+    src.infrastructure.reportportal
+
+This file exists for backward compatibility only.
+"""
+
+import warnings
+
+# Emit deprecation warning on first import
+warnings.warn(
+    "src.rp is deprecated. Use src.infrastructure.reportportal instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+# Re-export everything from new location for compatibility
+from src.infrastructure.reportportal import (
+    ReportPortalClient,
+    DEFECT_MAP,
     Launch,
     TestItem,
-    LogEntry,
-    AnalysisResult,
     TestStatus,
-    LaunchStatus,
-)
-from src.rp.component_fetcher import (
-    ComponentFetcher,
-    Component,
-    ComponentFailure,
-    LaunchResult,
     fetch_component_logs,
-)
-from src.rp.test_history import (
+    TestHistoryFetcher,
     TestHistory,
+    TestExecution,
     fetch_test_history,
+    fetch_test_history_by_name,
 )
 
 __all__ = [
-    # Client
     "ReportPortalClient",
-    "AuthenticationError",
-    # Models
+    "DEFECT_MAP",
     "Launch",
     "TestItem",
-    "LogEntry",
-    "AnalysisResult",
     "TestStatus",
-    "LaunchStatus",
-    # Component fetcher
-    "ComponentFetcher",
-    "Component",
-    "ComponentFailure",
-    "LaunchResult",
     "fetch_component_logs",
-    # Test history
+    "TestHistoryFetcher",
     "TestHistory",
+    "TestExecution",
     "fetch_test_history",
+    "fetch_test_history_by_name",
 ]

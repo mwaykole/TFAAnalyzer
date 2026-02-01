@@ -625,7 +625,7 @@ def parse_logs(
 def investigate(
     launch_id: Annotated[
         str,
-        typer.Option("--launch-id", "-l", help="ReportPortal launch ID"),
+        typer.Option("--launch-id", "-l", help="ReportPortal launch ID or full URL (e.g., https://rp.example.com/ui/#project/launches/all/9657)"),
     ],
     component: Annotated[
         str,
@@ -671,8 +671,22 @@ def investigate(
     --verify: Actually run the test using 'uv run pytest' to check if it passes
     --analyze-history: Analyze ReportPortal history pattern + test code for flakiness
     
+    Examples:
+        # Using launch ID
+        python main.py investigate -l 9657 -c Model_server --push
+        
+        # Using full ReportPortal URL (launch ID is auto-extracted)
+        python main.py investigate -l "https://rp.example.com/ui/#project/launches/all/9657" -c Model_server
+    
     Use -v/--verbose for detailed debugging output.
     """
+    # Parse URL to extract launch ID if full URL provided
+    from src.utils.url_parser import extract_launch_id
+    original_input = launch_id
+    launch_id = extract_launch_id(launch_id)
+    if original_input != launch_id:
+        console.print(f"[dim]Extracted launch ID [cyan]{launch_id}[/cyan] from URL[/dim]")
+    
     if not _verbose:
         setup_logging(level="WARNING", log_format="console")
     
@@ -1512,7 +1526,7 @@ def serve(
 def analyze(
     launch_id: Annotated[
         str,
-        typer.Option("--launch-id", "-l", help="ReportPortal launch ID"),
+        typer.Option("--launch-id", "-l", help="ReportPortal launch ID or full URL (e.g., https://rp.example.com/ui/#project/launches/all/9657)"),
     ],
     component: Annotated[
         str,
@@ -1560,14 +1574,24 @@ def analyze(
     Can run locally or connect to centralized TFA server (--server).
     
     Examples:
-        # Local mode
+        # Using launch ID
         python main.py analyze -l 9657 -c Model_server --push
+        
+        # Using full ReportPortal URL
+        python main.py analyze -l "https://rp.example.com/ui/#project/launches/all/9657" -c Model_server --push
         
         # Server mode (shared cache across 30 users)
         python main.py analyze -l 9657 -c Model_server --server http://tfa:8000 --push
         
     Use -v/--verbose for detailed debugging output.
     """
+    # Parse URL to extract launch ID if full URL provided
+    from src.utils.url_parser import extract_launch_id, is_rp_url
+    original_input = launch_id
+    launch_id = extract_launch_id(launch_id)
+    if original_input != launch_id:
+        console.print(f"[dim]Extracted launch ID [cyan]{launch_id}[/cyan] from URL[/dim]")
+    
     if not _verbose:
         setup_logging(level="WARNING", log_format="console")
     

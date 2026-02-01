@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from src.rp.client import ReportPortalClient
-from src.rp.models import Launch, LogEntry, TestItem, TestStatus
+from src.infrastructure.reportportal.client import ReportPortalClient
+from src.infrastructure.reportportal.models import Launch, LogEntry, TestItem, TestStatus
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -331,7 +331,7 @@ class ComponentFetcher:
         # Create or use existing component
         if not component:
             # Create a virtual component for these failures
-            from src.rp.models import TestItem
+            from src.infrastructure.reportportal.models import TestItem
             virtual_item = TestItem(
                 id="virtual",
                 name=component_name,

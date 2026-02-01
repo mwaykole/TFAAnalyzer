@@ -143,13 +143,8 @@ export function ResultCard({ result, index }: ResultCardProps) {
             </div>
           )}
 
-          <div className="flex items-center gap-4 pt-2">
-            <span className="text-xs text-gray-500">
-              Test ID: {result.test_id}
-            </span>
-            <span className="text-xs text-gray-500">
-              Confidence: {result.classification.confidence_percent}%
-            </span>
+          <div className="flex items-center gap-4 pt-2 text-xs text-gray-500">
+            <span>Test ID: {result.test_id}</span>
           </div>
         </div>
       )}

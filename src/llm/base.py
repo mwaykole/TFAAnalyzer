@@ -7,7 +7,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
-from src.rp.models import AnalysisResult, FailureClassification
+from src.infrastructure.reportportal.models import AnalysisResult, FailureClassification
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)

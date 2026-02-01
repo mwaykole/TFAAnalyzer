@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from src.storage.sqlite_store import get_store
+from src.infrastructure.storage.sqlite_store import get_store
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)

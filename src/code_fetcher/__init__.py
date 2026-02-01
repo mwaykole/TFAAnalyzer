@@ -1,6 +1,31 @@
-"""Test code fetcher module for fetching source code from GitHub or local repos."""
+"""Code fetcher module - DEPRECATED.
 
-from src.code_fetcher.github_fetcher import GitHubCodeFetcher, LocalCodeFetcher, TestCodeInfo
-from src.code_fetcher.test_parser import TestParser, ParsedTest
+This module is deprecated. Please import from:
+    src.infrastructure.code_fetcher
 
-__all__ = ["GitHubCodeFetcher", "LocalCodeFetcher", "TestCodeInfo", "TestParser", "ParsedTest"]
+This file exists for backward compatibility only.
+"""
+
+import warnings
+
+warnings.warn(
+    "src.code_fetcher is deprecated. Use src.infrastructure.code_fetcher instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+# Re-export from new location
+from src.infrastructure.code_fetcher import (
+    GitHubCodeFetcher,
+    LocalCodeFetcher,
+    TestParser,
+)
+
+# Provide alias for backward compatibility
+TestCodeInfo = None  # Import from infrastructure if needed
+
+__all__ = [
+    "GitHubCodeFetcher",
+    "LocalCodeFetcher",
+    "TestParser",
+]
