@@ -12,9 +12,5 @@ warnings.warn(
     "src.integrations is deprecated. Use src.infrastructure.notifications instead.",
     DeprecationWarning,
     stacklevel=2,
-)
-
-# Re-export from new location
-from src.infrastructure.notifications import SlackNotifier, TeamsNotifier
-
-__all__ = ["SlackNotifier", "TeamsNotifier"]
+)# Re-export from new location
+from src.infrastructure.notifications import SlackNotifier, TeamsNotifier__all__ = ["SlackNotifier", "TeamsNotifier"]

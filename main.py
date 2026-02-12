@@ -118,7 +118,7 @@ def list_launches(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    from src.rp.client import ReportPortalClient
+    from src.rp import ReportPortalClient
 
     async def fetch_launches() -> None:
         rp_client = ReportPortalClient(
@@ -200,7 +200,7 @@ def component_logs(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    from src.rp.component_fetcher import fetch_component_logs
+    from src.rp import fetch_component_logs
 
     async def fetch() -> None:
         result = await fetch_component_logs(
@@ -293,8 +293,8 @@ def test_history(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    from src.rp.component_fetcher import fetch_component_logs
-    from src.rp.test_history import fetch_test_history
+    from src.rp import fetch_component_logs
+    from src.rp import fetch_test_history
 
     async def fetch() -> None:
         result = await fetch_component_logs(
@@ -702,15 +702,16 @@ def investigate(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
     
-    from src.rp.client import ReportPortalClient, DEFECT_MAP
-    from src.rp.component_fetcher import fetch_component_logs
-    from src.rp.test_history import TestHistoryFetcher
+    from src.rp import ReportPortalClient, DEFECT_MAP
+    from src.rp import fetch_component_logs
+    from src.rp import TestHistoryFetcher
     from src.investigator import RCAInvestigator, RCA, get_error_signature
     from src.utils.ui import CLASSIFICATION_ICONS, SEVERITY_ICONS
     from src.utils.metrics import start_metrics, finish_metrics
     from src.domain.services.verification_service import VerificationService, VerifyMode
     from src.domain.interfaces.code_fetcher import CodeFetcher
     from src.domain.interfaces.notifier import AnalysisSummary
+    from src.domain.services.parallel_prep_service import ParallelPrepService
     
     # Determine verification mode
     if verify:
@@ -835,6 +836,40 @@ def investigate(
             metrics.unique_signatures = len(signature_groups)
             console.print(f"[dim]Grouped into {len(signature_groups)} unique error signature(s)[/dim]")
             
+            # ============================================================
+            # PHASE 1: Parallel Data Preparation (I/O operations)
+            # ============================================================
+            console.print("[dim]Phase 1: Preparing data in parallel...[/dim]")
+            
+            # Create history fetcher for verification
+            history_fetcher_instance = None
+            if verify_mode in (VerifyMode.ANALYZE_HISTORY, VerifyMode.ALL):
+                history_fetcher_instance = TestHistoryFetcher(rp_client, max_launches=14)
+            
+            # Create parallel prep service
+            parallel_prep = ParallelPrepService(
+                code_fetcher=code_fetcher,
+                verification_service=verification_service,
+                history_fetcher=history_fetcher_instance,
+                max_concurrent_io=10,
+            )
+            
+            # Prepare all data in parallel
+            prepared_data, prep_stats = await parallel_prep.prepare_all(
+                signature_groups=signature_groups,
+                verify_mode=verify_mode,
+                fallback_code_getter=lambda name: _get_test_code(name, settings),
+            )
+            
+            console.print(f"[dim]  ✓ Code fetched: {prep_stats.code_fetched} | "
+                         f"Verifications: {prep_stats.verifications_run} | "
+                         f"Time: {prep_stats.prep_time_ms}ms[/dim]")
+            
+            # ============================================================
+            # PHASE 2: Sequential LLM Processing (with pre-fetched data)
+            # ============================================================
+            console.print("[dim]Phase 2: Running LLM analysis (sequential)...[/dim]")
+            
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -844,90 +879,43 @@ def investigate(
             ) as progress:
                 task = progress.add_task("Investigating...", total=len(failures))
                 
-                for sig, group in signature_groups.items():
-                    first_failure = group[0]
-                    test_name = first_failure.test_item.name or "unknown"
-                    test_id = str(first_failure.test_item.id)
-                    logs = first_failure.combined_logs
+                for data in prepared_data:
+                    test_name = data.test_name
+                    test_id = data.test_id
+                    logs = data.logs
+                    sig = data.signature
                     
                     log_step(f"Investigating: {test_name[:50]}...")
                     log_debug("Test details", test_id=test_id, signature=sig[:12], 
-                              log_length=len(logs), group_size=len(group))
+                              log_length=len(logs), group_size=data.group_size)
                     
-                    # Get test code first (needed for verification and LLM)
-                    test_code = ""
-                    test_code_info = None
-                    if code_fetcher:
-                        try:
-                            test_code_info = await code_fetcher.fetch_test_code(test_name)
-                            if test_code_info:
-                                test_code = test_code_info.source_code
-                                log_debug("Test code fetched via code_fetcher",
-                                         file=test_code_info.file_path,
-                                         github_url=bool(test_code_info.github_url),
-                                         is_flaky=test_code_info.is_potentially_flaky)
-                        except Exception as e:
-                            log_debug("Code fetcher failed, using fallback", error=str(e))
+                    # Use pre-fetched data
+                    test_code = data.test_code
+                    test_code_info = data.test_code_info
+                    verification_result = data.verification_result
+                    verification_output = data.verification_output
                     
-                    # Fallback to simple file search
-                    if not test_code:
-                        test_code = _get_test_code(test_name, settings)
-                        if test_code:
-                            log_debug("Test code found via fallback", length=len(test_code))
+                    if test_code_info:
+                        log_debug("Using pre-fetched code",
+                                 file=test_code_info.file_path,
+                                 github_url=bool(test_code_info.github_url))
                     
-                    # Run verification based on mode (only first in group)
-                    verification_result = "not_run"
-                    verification_output = ""
-                    verification_details = {}
-                    
-                    if verify_mode != VerifyMode.NONE and sig not in verified_signatures:
-                        log_step(f"Running verification: {verify_mode.value}")
-                        
-                        # Get history for analyze-history mode
-                        history_data = {}
-                        if verify_mode == VerifyMode.ANALYZE_HISTORY:
-                            try:
-                                history_fetcher = TestHistoryFetcher(rp_client, max_launches=14)
-                                history_obj = await history_fetcher.get_test_history(test_name)
-                                history_data = history_obj.to_dict()
-                                log_debug("History fetched", 
-                                         total_runs=history_data.get("total_runs", 0),
-                                         is_flaky=history_data.get("is_flaky", False))
-                            except Exception as e:
-                                log_debug("Failed to fetch history", error=str(e))
-                        
-                        # Run verification
-                        v_result = await verification_service.verify(
-                            test_name=test_name,
-                            mode=verify_mode,
-                            logs=logs,
-                            test_code=test_code,
-                            history=history_data,
-                        )
-                        
-                        verification_result = v_result.status
-                        verification_output = v_result.output
-                        verification_details = v_result.to_dict()
-                        verified_signatures[sig] = verification_result
+                    # Display verification result if run
+                    if verification_result != "not_run":
                         metrics.record_verification(verification_result)
-                        
-                        # Display verification result
-                        if v_result.status == "passed":
+                        if verification_result == "passed":
                             console.print(f"    [green]✓ PASSED on re-run - Intermittent Failure[/green]")
-                        elif v_result.status == "flaky":
-                            console.print(f"    [yellow]⚡ FLAKY - {v_result.reason[:60]}[/yellow]")
-                        elif v_result.status == "consistent_fail":
-                            console.print(f"    [red]✗ Consistent failure ({v_result.details.get('history', {}).get('consecutive_failures', '?')} consecutive)[/red]")
-                        elif v_result.status == "failed":
+                        elif verification_result == "flaky":
+                            reason = data.verification_details.get("reason", "")[:60]
+                            console.print(f"    [yellow]⚡ FLAKY - {reason}[/yellow]")
+                        elif verification_result == "consistent_fail":
+                            consecutive = data.verification_details.get("details", {}).get("history", {}).get("consecutive_failures", "?")
+                            console.print(f"    [red]✗ Consistent failure ({consecutive} consecutive)[/red]")
+                        elif verification_result == "failed":
                             console.print(f"    [red]✗ FAILED on re-run - Consistent bug[/red]")
                         else:
-                            console.print(f"    [dim]? {v_result.status}: {v_result.reason[:50]}[/dim]")
-                        
-                        log_debug("Verification complete",
-                                 status=v_result.status,
-                                 confidence=f"{v_result.confidence:.0%}")
-                    elif verify_mode != VerifyMode.NONE:
-                        verification_result = verified_signatures[sig]
+                            reason = data.verification_details.get("reason", "")[:50]
+                            console.print(f"    [dim]? {verification_result}: {reason}[/dim]")
                     
                     # Progress callback
                     def on_progress(step: str, detail: str = ""):
@@ -938,6 +926,7 @@ def investigate(
                     
                     investigator.progress_callback = on_progress
                     
+                    # Sequential LLM call (only one active at a time)
                     log_step("Calling LLM for analysis")
                     rca = await investigator.investigate(
                         test_name=test_name,
@@ -970,8 +959,10 @@ def investigate(
                     results.append((test_name, test_id, rca))
                     progress.update(task, advance=1)
                     
-                    # Reuse RCA for similar failures
-                    for other in group[1:]:
+                    # Reuse RCA for similar failures in the same group
+                    # Find the original group to get other failures
+                    original_group = signature_groups.get(sig, [])
+                    for other in original_group[1:]:
                         other_name = other.test_item.name or "unknown"
                         other_id = str(other.test_item.id)
                         results.append((other_name, other_id, rca))
@@ -1155,7 +1146,7 @@ def _print_rca_results(results: list[tuple[str, str, "RCA"]], launch_name: str, 
 
 async def _post_rca_results(rp_client, results: list[tuple[str, str, "RCA"]]) -> None:
     """Post RCA results to ReportPortal."""
-    from src.rp.client import DEFECT_MAP
+    from src.rp import DEFECT_MAP
     
     posted = 0
     for test_name, test_id, rca in results:
@@ -1621,7 +1612,7 @@ def analyze(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
     
-    from src.rp.component_fetcher import fetch_component_logs
+    from src.rp import fetch_component_logs
     from src.domain.services.classification_service import ClassificationService
     from src.domain.services.investigation_service import InvestigationService
     from src.infrastructure.llm.llm_factory import LLMFactory
@@ -1630,7 +1621,7 @@ def analyze(
     classifier = ClassificationService()
     
     async def run_analysis() -> None:
-        from src.rp.client import ReportPortalClient, DEFECT_MAP
+        from src.rp import ReportPortalClient, DEFECT_MAP
         
         rp_client = ReportPortalClient(
             url=settings.get_rp_url(),

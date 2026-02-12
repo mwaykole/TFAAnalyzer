@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.llm.base import LLMProvider
+from src.llm.prompts import (
+    get_rhoai_context,
+    build_thinker_prompt,
+    build_critic_prompt,
+    build_refiner_prompt,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -26,26 +32,8 @@ warnings.warn(
     stacklevel=2,
 )
 
-# RHOAI Domain Knowledge
-RHOAI_CONTEXT = """
-RHOAI/ODH Component Knowledge:
-- KServe: Serverless inference platform for ML models
-- InferenceService: KServe CRD for deploying models
-- vLLM: High-performance LLM inference runtime (GPU-optimized)
-- Kueue: Kubernetes batch scheduler for ML workloads
-- ResourceFlavor: Kueue CRD defining compute resources
-- ModelMesh: Multi-model serving infrastructure
-- TrustyAI: Model explainability service
-- Codeflare: Distributed computing for ML
-- Ray: Distributed execution framework
-
-Common Failure Patterns:
-- CRD not found → Operator not installed or needs reconciliation
-- InferenceService not ready → Model loading, resource constraints, or config error
-- Timeout waiting for pod → Resource scheduling, image pull, or init container issues
-- OOMKilled → Memory limit too low for model size
-- GPU unavailable → Node selector, taint, or quota issues
-"""
+# Load RHOAI context from prompt file
+RHOAI_CONTEXT = get_rhoai_context()
 
 
 @dataclass
@@ -398,27 +386,15 @@ class RCAInvestigator:
     
     async def _think(self, test_name: str, evidence: Evidence) -> str:
         """Thinker: Propose initial RCA with RHOAI context."""
-        system = f"""You are a senior RHOAI QE engineer. Analyze test failures concisely.
-
-{RHOAI_CONTEXT}
-
-Be specific about the root cause. Consider RHOAI component interactions."""
-
-        prompt = f"""Analyze this failure:
-
-TEST: {test_name}
-ERROR: {evidence.error_type}: {evidence.error_message[:300]}
-PATTERNS: {', '.join(evidence.patterns) or 'None detected'}
-STACK: {evidence.stack_trace[:400] if evidence.stack_trace else 'N/A'}
-DECORATORS: {', '.join(evidence.decorators[:5]) or 'None'}
-
-Classifications:
-1. Product Bug - RHOAI/ODH component defect
-2. Test Automation Issue - Test code problem
-3. Infrastructure Issue - Cluster/environment problem  
-4. Intermittent Failure - Timing/flaky issue
-
-Provide: classification, specific root cause, confidence %."""
+        system, prompt = build_thinker_prompt(
+            test_name=test_name,
+            error_type=evidence.error_type,
+            error_message=evidence.error_message[:300],
+            patterns=', '.join(evidence.patterns) or 'None detected',
+            stack_trace=evidence.stack_trace[:400] if evidence.stack_trace else 'N/A',
+            decorators=', '.join(evidence.decorators[:5]) or 'None',
+            rhoai_context=RHOAI_CONTEXT,
+        )
         
         try:
             response = await self.llm.analyze(system, prompt)
@@ -444,20 +420,10 @@ Provide: classification, specific root cause, confidence %."""
     
     async def _critique(self, initial_rca: str, evidence: Evidence, context: str) -> str:
         """Critic: Challenge the analysis."""
-        system = "You are a critical code reviewer. Find flaws in reasoning. Be brief."
-        
-        prompt = f"""Review this RCA:
-
-{initial_rca[:500]}
-
-Additional context: {context}
-
-Challenge:
-1. What assumptions might be wrong?
-2. Alternative explanations?
-3. Missing evidence?
-
-Be rigorous but concise."""
+        system, prompt = build_critic_prompt(
+            initial_rca=initial_rca[:500],
+            context=context,
+        )
         
         try:
             response = await self.llm.analyze(system, prompt)
@@ -479,26 +445,13 @@ Be rigorous but concise."""
         if len(evidence.patterns) > 1:
             base_confidence += 0.05
         
-        system = "You are an expert QE engineer. Provide final structured analysis."
-        
-        prompt = f"""Finalize RCA considering initial analysis and critique.
-
-INITIAL: {initial_rca[:400]}
-
-CRITIQUE: {critique[:300]}
-
-EVIDENCE:
-- Error: {evidence.error_message[:200]}
-- Patterns: {', '.join(evidence.patterns)}
-- Suggested confidence: {base_confidence:.0%}
-
-Format EXACTLY:
-CLASSIFICATION: [Product Bug|Test Automation Issue|Infrastructure Issue|Intermittent Failure]
-CONFIDENCE: [number]%
-SEVERITY: [LOW|MEDIUM|HIGH|CRITICAL]
-ROOT_CAUSE: [one specific sentence]
-REASONING: [2 sentences max]
-RECOMMENDATION: [actionable steps]"""
+        system, prompt = build_refiner_prompt(
+            initial_rca=initial_rca[:400],
+            critique=critique[:300],
+            error_message=evidence.error_message[:200],
+            patterns=', '.join(evidence.patterns),
+            suggested_confidence=f"{base_confidence:.0%}",
+        )
         
         try:
             response = await self.llm.analyze(system, prompt)

@@ -4,6 +4,8 @@ Implements LLMProvider interface for Claude CLI and Anthropic API.
 Open/Closed: Implements abstract interface without modifying it.
 """
 
+import asyncio
+import shutil
 import subprocess
 
 from src.domain.interfaces.llm_provider import LLMProvider, LLMResponse
@@ -16,9 +18,16 @@ class ClaudeAdapter(LLMProvider):
     Free to use, no API key required.
     """
     
-    def __init__(self, model: str | None = None):
-        """Initialize Claude CLI adapter."""
+    def __init__(self, model: str | None = None, timeout: int = 300):
+        """Initialize Claude CLI adapter.
+        
+        Args:
+            model: Model to use (passed to CLI)
+            timeout: Timeout in seconds for CLI response (default 5 minutes)
+        """
         self._model = model or "claude-sonnet-4-20250514"
+        self._timeout = timeout
+        self._claude_path = shutil.which("claude")
     
     @property
     def provider_name(self) -> str:
@@ -29,35 +38,50 @@ class ClaudeAdapter(LLMProvider):
         return self._model
     
     async def analyze(self, system_prompt: str, user_prompt: str) -> LLMResponse:
-        """Send analysis request via Claude CLI."""
+        """Send analysis request via Claude CLI using stdin for large prompts."""
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
         
+        if not self._claude_path:
+            raise RuntimeError("Claude CLI not found. Install Claude Code or use --provider anthropic")
+        
         try:
-            result = subprocess.run(
-                ["claude", "-p", full_prompt],
-                capture_output=True,
-                text=True,
-                timeout=120,
+            process = await asyncio.create_subprocess_exec(
+                self._claude_path,
+                "--print",
+                "--output-format", "text",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             
-            if result.returncode != 0:
-                raise RuntimeError(f"Claude CLI error: {result.stderr}")
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=full_prompt.encode()),
+                timeout=self._timeout,
+            )
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                raise RuntimeError(f"Claude CLI error: {error_msg}")
             
             return LLMResponse(
-                content=result.stdout.strip(),
+                content=stdout.decode().strip(),
                 model=self._model,
                 provider=self.provider_name,
             )
+        except asyncio.TimeoutError:
+            if process:
+                process.kill()
+            raise RuntimeError(f"Claude CLI timed out after {self._timeout}s")
         except FileNotFoundError:
-            raise RuntimeError("Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-cli")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Claude CLI timed out")
+            raise RuntimeError("Claude CLI not found. Install Claude Code or use --provider anthropic")
     
     async def is_available(self) -> bool:
         """Check if Claude CLI is available."""
+        if not self._claude_path:
+            return False
         try:
             result = subprocess.run(
-                ["claude", "--version"],
+                [self._claude_path, "--version"],
                 capture_output=True,
                 timeout=5,
             )

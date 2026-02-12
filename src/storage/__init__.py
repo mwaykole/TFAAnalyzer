@@ -12,9 +12,5 @@ warnings.warn(
     "src.storage is deprecated. Use src.infrastructure.storage instead.",
     DeprecationWarning,
     stacklevel=2,
-)
-
-# Re-export from new location
-from src.infrastructure.storage import AnalysisStore, get_store
-
-__all__ = ["AnalysisStore", "get_store"]
+)# Re-export from new location
+from src.infrastructure.storage import AnalysisStore, get_store__all__ = ["AnalysisStore", "get_store"]

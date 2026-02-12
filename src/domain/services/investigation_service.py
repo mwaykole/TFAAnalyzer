@@ -19,6 +19,7 @@ from src.domain.entities.failure import Failure
 from src.domain.entities.rca import RCA
 from src.domain.interfaces.llm_provider import LLMProvider
 from src.domain.services.classification_service import ClassificationService
+from src.prompts.loader import get_prompt_loader
 from src.utils.knowledge_base import get_knowledge_base, KnowledgeBaseMatch
 from src.utils.logging import get_logger
 
@@ -148,11 +149,10 @@ class InvestigationService:
         - Pre-error context
         - Enhanced analysis fields
         """
-        prompt_parts = []
+        loader = get_prompt_loader()
         
-        # =========================================================
-        # ENHANCED: Add few-shot examples from similar past failures
-        # =========================================================
+        # Build optional sections
+        few_shot_section = ""
         if self._failure_store:
             try:
                 few_shot_section = self._failure_store.build_few_shot_prompt(
@@ -160,71 +160,51 @@ class InvestigationService:
                     error_type=evidence.error_type or "UnknownError",
                     error_message=evidence.error_message or failure.logs[:300],
                     stack_trace=evidence.stack_trace or "",
-                    k=2,  # Include 2 similar examples
+                    k=2,
                 )
                 if few_shot_section:
-                    prompt_parts.append(few_shot_section)
+                    few_shot_section += "\n"
                     logger.debug("few_shot_examples_added", test_name=failure.test_name[:30])
             except Exception as e:
                 logger.warning("few_shot_failed", error=str(e))
         
-        # Base prompt with failure details
-        prompt_parts.append(f"""Analyze this failure:
-
-TEST: {failure.test_name}
-ERROR: {evidence.error_type}: {evidence.error_message[:300]}
-PATTERNS: {', '.join(evidence.patterns) or 'None detected'}
-STACK: {evidence.stack_trace[:500] if evidence.stack_trace else 'N/A'}
-DECORATORS: {', '.join(evidence.decorators[:5]) or 'None'}
-""")
-        
-        # =========================================================
-        # ENHANCED: Add pre-error context if available
-        # =========================================================
+        pre_error_context = ""
         if hasattr(evidence, 'pre_error_context') and evidence.pre_error_context:
-            prompt_parts.append(f"""
-CONTEXT (logs before error):
-{evidence.pre_error_context[:400]}
-""")
+            pre_error_context = f"\nCONTEXT (logs before error):\n{evidence.pre_error_context[:400]}\n"
         
-        # =========================================================
-        # ENHANCED: Add timeout analysis if available
-        # =========================================================
+        timeout_analysis = ""
         if hasattr(evidence, 'timeout_analysis') and evidence.timeout_analysis:
-            prompt_parts.append(f"""
-TIMEOUT ANALYSIS: {evidence.timeout_analysis}
-""")
+            timeout_analysis = f"\nTIMEOUT ANALYSIS: {evidence.timeout_analysis}\n"
         
-        # =========================================================
-        # ENHANCED: Add systemic issue context if detected
-        # =========================================================
+        systemic_issue = ""
         if hasattr(evidence, 'systemic_issue') and evidence.systemic_issue:
-            prompt_parts.append(f"""
+            cluster_rec = getattr(evidence, 'cluster_recommendation', 'Investigate infrastructure')
+            systemic_issue = f"""
 ⚠️ SYSTEMIC ISSUE DETECTED: {evidence.systemic_issue}
 This failure is likely part of a broader infrastructure issue affecting multiple tests.
-Recommendation: {getattr(evidence, 'cluster_recommendation', 'Investigate infrastructure')}
-""")
+Recommendation: {cluster_rec}
+"""
         
-        # Add knowledge base context if available
+        kb_context = ""
         if kb_match:
-            kb_context = kb_match.get_context_for_llm()
-            if kb_context:
-                prompt_parts.append(f"""
-{kb_context}
-
-IMPORTANT: Consider the domain knowledge above when classifying this failure.
-""")
+            kb_ctx = kb_match.get_context_for_llm()
+            if kb_ctx:
+                kb_context = f"\n{kb_ctx}\n\nIMPORTANT: Consider the domain knowledge above when classifying this failure.\n"
         
-        prompt_parts.append("""
-Classifications:
-1. Product Bug - RHOAI/ODH component defect
-2. Test Automation Issue - Test code problem
-3. Infrastructure Issue - Cluster/environment problem  
-4. Intermittent Failure - Timing/flaky issue
-
-Provide: classification, specific root cause, confidence %.""")
-        
-        return "\n".join(prompt_parts)
+        return loader.render_safe(
+            "investigation/evidence.md",
+            few_shot_section=few_shot_section,
+            test_name=failure.test_name,
+            error_type=evidence.error_type or "UnknownError",
+            error_message=evidence.error_message[:300] if evidence.error_message else "",
+            patterns=', '.join(evidence.patterns) or 'None detected',
+            stack_trace=evidence.stack_trace[:500] if evidence.stack_trace else 'N/A',
+            decorators=', '.join(evidence.decorators[:5]) or 'None',
+            pre_error_context=pre_error_context,
+            timeout_analysis=timeout_analysis,
+            systemic_issue=systemic_issue,
+            kb_context=kb_context,
+        )
     
     async def _prepare_context(self, evidence: Evidence) -> str:
         """Prepare context for Critic (runs in parallel with Thinker).

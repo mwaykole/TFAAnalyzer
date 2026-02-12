@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+from src.prompts.loader import get_prompt_loader
+
 
 @dataclass
 class LLMResponse:
@@ -74,8 +76,11 @@ class LLMProvider(ABC):
         
         Default implementation uses analyze() with thinking system prompt.
         """
-        system = """You are a senior RHOAI QE engineer. Analyze test failures concisely.
-Be specific about the root cause. Consider RHOAI component interactions."""
+        loader = get_prompt_loader()
+        system = loader.render(
+            "investigation/thinker_system.md",
+            rhoai_context=loader.load("context/rhoai_knowledge.md"),
+        )
         
         response = await self.analyze(system, evidence_prompt)
         return response.content
@@ -85,19 +90,13 @@ Be specific about the root cause. Consider RHOAI component interactions."""
         
         Default implementation uses analyze() with critic system prompt.
         """
-        system = "You are a critical code reviewer. Find flaws in reasoning. Be brief."
-        prompt = f"""Review this RCA:
-
-{initial_rca[:500]}
-
-Additional context: {context}
-
-Challenge:
-1. What assumptions might be wrong?
-2. Alternative explanations?
-3. Missing evidence?
-
-Be rigorous but concise."""
+        loader = get_prompt_loader()
+        system = loader.load("investigation/critic_system.md")
+        prompt = loader.render(
+            "investigation/critic_user.md",
+            initial_rca=initial_rca[:500],
+            context=context,
+        )
         
         response = await self.analyze(system, prompt)
         return response.content
@@ -109,22 +108,16 @@ Be rigorous but concise."""
         
         Default implementation uses analyze() with refiner system prompt.
         """
-        system = "You are an expert QE engineer. Provide final structured analysis."
-        prompt = f"""Finalize RCA considering initial analysis and critique.
-
-INITIAL: {initial_rca[:400]}
-
-CRITIQUE: {critique[:300]}
-
-EVIDENCE: {evidence_summary}
-
-Format EXACTLY:
-CLASSIFICATION: [Product Bug|Test Automation Issue|Infrastructure Issue|Intermittent Failure]
-CONFIDENCE: [number]%
-SEVERITY: [LOW|MEDIUM|HIGH|CRITICAL]
-ROOT_CAUSE: [one specific sentence]
-REASONING: [2 sentences max]
-RECOMMENDATION: [actionable steps]"""
+        loader = get_prompt_loader()
+        system = loader.load("investigation/refiner_system.md")
+        prompt = loader.render(
+            "investigation/refiner_user.md",
+            initial_rca=initial_rca[:400],
+            critique=critique[:300],
+            error_message=evidence_summary,
+            patterns="See evidence summary",
+            suggested_confidence="60%",
+        )
         
         response = await self.analyze(system, prompt)
         return response.content

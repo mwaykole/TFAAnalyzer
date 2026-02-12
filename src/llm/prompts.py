@@ -1,101 +1,20 @@
-"""LLM prompt templates for test failure analysis."""
+"""LLM prompt templates for test failure analysis.
 
-from string import Template
+This module provides backward-compatible access to prompts while using
+the new file-based prompt system under the hood.
+"""
 
-SYSTEM_PROMPT = """You are an expert software test failure analyst. Your task is to analyze test failures from automated test runs and provide structured analysis.
+from src.prompts.loader import get_prompt_loader
 
-You will be given:
-1. Test name and metadata
-2. Test logs and stack traces
-3. Optional: Test code or additional context
-
-Your analysis must include:
-- A brief summary of what failed
-- Root cause analysis explaining why the failure occurred
-- Classification of the failure type
-- Recommended fix or investigation steps
-- Confidence level in your analysis
-
-## Classification Categories
-
-You MUST classify each failure into exactly ONE of these categories:
-
-1. **Application Bug**: A defect in the application code under test
-   - Examples: Logic errors, null pointer exceptions, incorrect calculations
-   
-2. **Test Bug**: A defect in the test code itself
-   - Examples: Incorrect assertions, wrong selectors, outdated test data
-   
-3. **Flaky**: Intermittent failure that may pass on retry
-   - Examples: Race conditions, timing issues, order-dependent tests
-   
-4. **Environment**: Infrastructure or configuration issues
-   - Examples: Service unavailable, connection timeouts, missing dependencies
-   
-5. **Data Issue**: Problems with test data or data state
-   - Examples: Missing test data, stale data, database state issues
-
-## Response Format
-
-You MUST respond with valid JSON in this exact format:
-{
-    "summary": "Brief one-sentence description of the failure",
-    "root_cause": "Detailed explanation of why the failure occurred",
-    "classification": "One of: Application Bug, Test Bug, Flaky, Environment, Data Issue",
-    "recommendation": "Specific actionable steps to fix or investigate",
-    "confidence": 0.0 to 1.0
-}
-
-## Confidence Guidelines
-
-- 0.9-1.0: Clear evidence in logs, definitive root cause
-- 0.7-0.9: Strong indicators, likely root cause
-- 0.5-0.7: Partial evidence, probable cause
-- 0.3-0.5: Limited information, possible cause
-- 0.0-0.3: Insufficient data, speculative
-
-Respond ONLY with the JSON object, no additional text."""
+_loader = get_prompt_loader()
 
 
-ANALYSIS_PROMPT_TEMPLATE = Template("""Analyze this test failure:
-
-## Test Information
-- **Name**: ${test_name}
-- **Type**: ${test_type}
-- **Status**: ${status}
-${attributes_section}
-
-## Logs and Stack Trace
-${logs}
-
-${additional_context}
-
-Provide your analysis as a JSON object.""")
+def _load_prompt(path: str) -> str:
+    """Load a prompt from file."""
+    return _loader.load(path)
 
 
-CHUNK_ANALYSIS_PROMPT_TEMPLATE = Template("""Analyze this test failure. Note: The logs have been truncated to show the most relevant sections.
-
-## Test Information
-- **Name**: ${test_name}
-- **Type**: ${test_type}
-- **Status**: ${status}
-
-## Log Excerpt (${chunk_info})
-${logs}
-
-Provide your analysis as a JSON object, noting any limitations due to truncated logs in your confidence score.""")
-
-
-MULTI_CHUNK_SYNTHESIS_PROMPT = Template("""You have analyzed multiple chunks of logs from a single test failure. Synthesize your findings into a final analysis.
-
-## Test Information
-- **Name**: ${test_name}
-- **Type**: ${test_type}
-
-## Individual Chunk Analyses
-${chunk_analyses}
-
-Provide a unified analysis as a JSON object, considering all chunk analyses.""")
+SYSTEM_PROMPT = _load_prompt("system/analysis_system.md")
 
 
 def format_attributes(attributes: list[dict[str, str]]) -> str:
@@ -138,7 +57,8 @@ def build_analysis_prompt(
     if additional_context:
         context_section = f"\n## Additional Context\n{additional_context}"
     
-    return ANALYSIS_PROMPT_TEMPLATE.substitute(
+    return _loader.render(
+        "analysis/failure_analysis.md",
         test_name=test_name,
         test_type=test_type,
         status=status,
@@ -171,7 +91,8 @@ def build_chunk_analysis_prompt(
     """
     chunk_info = f"Chunk {chunk_index + 1} of {total_chunks}"
     
-    return CHUNK_ANALYSIS_PROMPT_TEMPLATE.substitute(
+    return _loader.render(
+        "analysis/chunk_analysis.md",
         test_name=test_name,
         test_type=test_type,
         status=status,
@@ -203,24 +124,12 @@ def build_synthesis_prompt(
         analyses_text += f"- Classification: {analysis.get('classification', 'N/A')}\n"
         analyses_text += f"- Confidence: {analysis.get('confidence', 0)}\n"
     
-    return MULTI_CHUNK_SYNTHESIS_PROMPT.substitute(
+    return _loader.render(
+        "analysis/synthesis.md",
         test_name=test_name,
         test_type=test_type,
         chunk_analyses=analyses_text,
     )
-
-
-CLASSIFICATION_REFINEMENT_PROMPT = Template("""Review this initial classification and refine if needed based on additional context:
-
-## Initial Analysis
-- Classification: ${classification}
-- Confidence: ${confidence}
-- Summary: ${summary}
-
-## Additional Indicators
-${indicators}
-
-If the classification should change, provide updated JSON. Otherwise, confirm the original analysis.""")
 
 
 def build_refinement_prompt(
@@ -242,10 +151,121 @@ def build_refinement_prompt(
     """
     indicators_text = "\n".join(f"- {ind}" for ind in indicators)
     
-    return CLASSIFICATION_REFINEMENT_PROMPT.substitute(
+    return _loader.render(
+        "classification/refinement.md",
         classification=classification,
         confidence=confidence,
         summary=summary,
         indicators=indicators_text,
     )
 
+
+def get_rhoai_context() -> str:
+    """Get RHOAI/ODH domain knowledge context."""
+    return _load_prompt("context/rhoai_knowledge.md")
+
+
+def get_compact_system_prompt() -> str:
+    """Get compact system prompt for token reduction."""
+    return _load_prompt("system/compact_system.md")
+
+
+def build_thinker_prompt(
+    test_name: str,
+    error_type: str,
+    error_message: str,
+    patterns: str,
+    stack_trace: str,
+    decorators: str,
+    rhoai_context: str = "",
+) -> tuple[str, str]:
+    """Build thinker system and user prompts.
+    
+    Args:
+        test_name: Name of the test
+        error_type: Type of error
+        error_message: Error message content
+        patterns: Detected patterns
+        stack_trace: Stack trace content
+        decorators: Test decorators
+        rhoai_context: Optional RHOAI context
+        
+    Returns:
+        Tuple of (system_prompt, user_prompt)
+    """
+    if not rhoai_context:
+        rhoai_context = get_rhoai_context()
+    
+    system_prompt = _loader.render(
+        "investigation/thinker_system.md",
+        rhoai_context=rhoai_context,
+    )
+    
+    user_prompt = _loader.render(
+        "investigation/thinker_user.md",
+        test_name=test_name,
+        error_type=error_type,
+        error_message=error_message,
+        patterns=patterns,
+        stack_trace=stack_trace,
+        decorators=decorators,
+    )
+    
+    return system_prompt, user_prompt
+
+
+def build_critic_prompt(
+    initial_rca: str,
+    context: str,
+) -> tuple[str, str]:
+    """Build critic system and user prompts.
+    
+    Args:
+        initial_rca: Initial RCA from thinker
+        context: Additional context
+        
+    Returns:
+        Tuple of (system_prompt, user_prompt)
+    """
+    system_prompt = _load_prompt("investigation/critic_system.md")
+    
+    user_prompt = _loader.render(
+        "investigation/critic_user.md",
+        initial_rca=initial_rca,
+        context=context,
+    )
+    
+    return system_prompt, user_prompt
+
+
+def build_refiner_prompt(
+    initial_rca: str,
+    critique: str,
+    error_message: str,
+    patterns: str,
+    suggested_confidence: str,
+) -> tuple[str, str]:
+    """Build refiner system and user prompts.
+    
+    Args:
+        initial_rca: Initial RCA from thinker
+        critique: Critique from critic
+        error_message: Error message
+        patterns: Detected patterns
+        suggested_confidence: Suggested confidence percentage
+        
+    Returns:
+        Tuple of (system_prompt, user_prompt)
+    """
+    system_prompt = _load_prompt("investigation/refiner_system.md")
+    
+    user_prompt = _loader.render(
+        "investigation/refiner_user.md",
+        initial_rca=initial_rca,
+        critique=critique,
+        error_message=error_message,
+        patterns=patterns,
+        suggested_confidence=suggested_confidence,
+    )
+    
+    return system_prompt, user_prompt

@@ -498,11 +498,5 @@ JSON:"""
 
 def _get_compact_system_prompt() -> str:
     """Get a compact system prompt to reduce input tokens."""
-    return """Classify test failure as JSON:
-{"summary":"brief","root_cause":"why","classification":"Product Bug|Test Automation Issue|Flaky Test","severity":"HIGH|MEDIUM|LOW","confidence":0.0-1.0,"recommendation":"fix"}
-
-Rules:
-- TimeoutError → Test Automation Issue
-- Version mismatch/crash → Product Bug
-- Network/S3 auth → Flaky Test
-JSON only:"""
+    from src.prompts.loader import get_prompt_loader
+    return get_prompt_loader().load("system/compact_system.md")

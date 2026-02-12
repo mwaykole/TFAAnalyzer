@@ -20,13 +20,13 @@ class ClaudeCLIProvider(LLMProvider):
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
-        timeout: int = 120,
+        timeout: int = 300,
     ):
         """Initialize Claude CLI provider.
 
         Args:
             model: Model to use (passed to CLI)
-            timeout: Timeout in seconds for CLI response
+            timeout: Timeout in seconds for CLI response (default 5 minutes)
         """
         self._model = model
         self.timeout = timeout
@@ -57,7 +57,7 @@ class ClaudeCLIProvider(LLMProvider):
         user_prompt: str,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Send prompt to Claude CLI and get response.
+        """Send prompt to Claude CLI via stdin (handles large prompts).
         
         Args:
             system_prompt: System instructions
@@ -68,18 +68,20 @@ class ClaudeCLIProvider(LLMProvider):
             Response as dict with 'summary' key or parsed JSON
         """
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        process = None
 
         try:
             process = await asyncio.create_subprocess_exec(
                 self._claude_path,
-                "-p", full_prompt,
+                "--print",
                 "--output-format", "text",
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
 
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+                process.communicate(input=full_prompt.encode()),
                 timeout=self.timeout,
             )
 
@@ -89,14 +91,14 @@ class ClaudeCLIProvider(LLMProvider):
 
             response_text = stdout.decode().strip()
             
-            # Try to parse as JSON first
             try:
                 return self.parse_response(response_text)
             except Exception:
-                # Return text response wrapped in dict
                 return {"summary": response_text, "raw": response_text}
 
         except asyncio.TimeoutError:
+            if process:
+                process.kill()
             raise LLMError(f"Claude CLI timed out after {self.timeout}s")
         except FileNotFoundError:
             raise LLMError("Claude CLI not found")
