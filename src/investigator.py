@@ -464,7 +464,9 @@ class RCAInvestigator:
             return self._fallback_rca(evidence)
     
     def _extract_text(self, response: Any) -> str:
-        """Extract text from LLM response (handles dict or str)."""
+        """Extract text from LLM response (handles LLMResponse, dict, or str)."""
+        if hasattr(response, "content"):
+            return response.content
         if isinstance(response, dict):
             return response.get("summary") or response.get("raw") or str(response)
         return str(response)

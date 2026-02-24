@@ -49,6 +49,7 @@ class ClaudeAdapter(LLMProvider):
                 self._claude_path,
                 "--print",
                 "--output-format", "text",
+                "--max-turns", "1",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

@@ -259,6 +259,11 @@ def load_yaml_config(config_path: Path) -> dict:
 
 def create_settings(config_path: Path | None = None) -> Settings:
     """Create settings from config file and environment variables."""
+    import os
+    from dotenv import load_dotenv
+
+    load_dotenv(override=True)
+
     config_data: dict = {}
 
     if config_path and config_path.exists():
@@ -269,11 +274,11 @@ def create_settings(config_path: Path | None = None) -> Settings:
             config_data = load_yaml_config(default_path)
 
     if "reportportal" not in config_data:
-        import os
-
         config_data["reportportal"] = {
             "url": os.environ.get("RP_URL", ""),
             "token": os.environ.get("RP_TOKEN", ""),
+            "username": os.environ.get("RP_USERNAME", ""),
+            "password": os.environ.get("RP_PASSWORD", ""),
             "project": os.environ.get("RP_PROJECT", ""),
         }
 
