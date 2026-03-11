@@ -269,12 +269,28 @@ class TestParser:
                 if func_name:
                     if "timeout" in func_name.lower():
                         parsed.has_timeout = True
+                        if not parsed.timeout_value:
+                            parsed.timeout_value = self._extract_timeout_from_call(child)
                     if "retry" in func_name.lower():
                         parsed.has_retry = True
                     if any(w in func_name.lower() for w in ["wait", "poll", "sampler"]):
                         if func_name not in parsed.waits_for:
                             parsed.waits_for.append(func_name)
+                        if not parsed.timeout_value:
+                            parsed.timeout_value = self._extract_timeout_from_call(child)
     
+    @staticmethod
+    def _extract_timeout_from_call(call: ast.Call) -> int | None:
+        """Extract timeout value from a call like TimeoutSampler(timeout=900)."""
+        for arg in call.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)):
+                return int(arg.value)
+        for kw in call.keywords:
+            if kw.arg in ("timeout", "wait_timeout", "timeout_seconds"):
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
+                    return int(kw.value.value)
+        return None
+
     def _get_call_name(self, call: ast.Call) -> str | None:
         """Get the name of a function call."""
         if isinstance(call.func, ast.Name):

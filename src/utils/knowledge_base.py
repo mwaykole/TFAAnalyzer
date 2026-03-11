@@ -223,10 +223,3 @@ def get_knowledge_base() -> KnowledgeBase:
     return _knowledge_base
 
 
-def reload_knowledge_base() -> None:
-    """Reload the knowledge base from file."""
-    global _knowledge_base
-    if _knowledge_base:
-        _knowledge_base.reload()
-    else:
-        _knowledge_base = KnowledgeBase()

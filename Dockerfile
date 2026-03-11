@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL maintainer="TFA Contributors"
 LABEL description="TFA - AI-powered Test Failure Analyzer"
-LABEL version="2.0.0"
+LABEL version="3.0.0"
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY main.py .
 COPY config.example.yaml ./config.example.yaml
-COPY classification_rules.yaml ./classification_rules.yaml
+COPY knowledge_base.yaml ./knowledge_base.yaml
 
 # Set ownership
 RUN chown -R appuser:appuser /app

@@ -19,10 +19,10 @@ class FailureCategory(str, Enum):
     
     @classmethod
     def from_string(cls, value: str) -> "FailureCategory":
-        """Parse category from string, handling variations."""
-        normalized = value.lower().strip()
+        """Parse category from string, handling LLM phrasing variations."""
+        normalized = value.lower().strip().rstrip(".")
         
-        mappings = {
+        exact = {
             "product bug": cls.PRODUCT_BUG,
             "product_bug": cls.PRODUCT_BUG,
             "pb": cls.PRODUCT_BUG,
@@ -43,7 +43,36 @@ class FailureCategory(str, Enum):
             "flaky": cls.INTERMITTENT_FAILURE,
         }
         
-        return mappings.get(normalized, cls.TO_INVESTIGATE)
+        if normalized in exact:
+            return exact[normalized]
+        
+        # Substring matching for LLM variations like
+        # "Product Bug (API error)", "Test Automation Issue - timeout"
+        substring_map = [
+            ("product bug", cls.PRODUCT_BUG),
+            ("product defect", cls.PRODUCT_BUG),
+            ("code defect", cls.PRODUCT_BUG),
+            ("software bug", cls.PRODUCT_BUG),
+            ("test automation", cls.TEST_AUTOMATION_ISSUE),
+            ("automation issue", cls.TEST_AUTOMATION_ISSUE),
+            ("test issue", cls.TEST_AUTOMATION_ISSUE),
+            ("test code", cls.TEST_AUTOMATION_ISSUE),
+            ("test framework", cls.TEST_AUTOMATION_ISSUE),
+            ("infrastructure", cls.INFRASTRUCTURE_ISSUE),
+            ("environment issue", cls.INFRASTRUCTURE_ISSUE),
+            ("cluster issue", cls.INFRASTRUCTURE_ISSUE),
+            ("platform issue", cls.INFRASTRUCTURE_ISSUE),
+            ("intermittent", cls.INTERMITTENT_FAILURE),
+            ("flaky", cls.INTERMITTENT_FAILURE),
+            ("race condition", cls.INTERMITTENT_FAILURE),
+            ("timing issue", cls.INTERMITTENT_FAILURE),
+        ]
+        
+        for keyword, cat in substring_map:
+            if keyword in normalized:
+                return cat
+        
+        return cls.TO_INVESTIGATE
     
     @property
     def defect_type_code(self) -> str:

@@ -190,7 +190,9 @@ class TextEmbedder:
                 self._backend = SentenceTransformerEmbedder()
             else:  # auto
                 try:
-                    self._backend = SentenceTransformerEmbedder()
+                    backend = SentenceTransformerEmbedder()
+                    backend.embed("test")
+                    self._backend = backend
                 except (ImportError, Exception) as e:
                     logger.info("falling_back_to_tfidf", reason=str(e))
                     self._backend = TFIDFEmbedder()

@@ -542,6 +542,63 @@ class ReportPortalClient:
 
         return all_logs
 
+    async def get_nested_step_logs(
+        self,
+        parent_item_id: str,
+        page_size: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch child test items (nested steps) and their logs.
+
+        ReportPortal stores test steps as child items. This fetches
+        them with their logs to provide step-level failure context.
+
+        Args:
+            parent_item_id: Parent test item ID
+            page_size: Items per page
+
+        Returns:
+            List of dicts with step name, status, and logs
+        """
+        steps: list[dict[str, Any]] = []
+        try:
+            params: dict[str, Any] = {
+                "filter.eq.parentId": parent_item_id,
+                "page.page": 1,
+                "page.size": page_size,
+                "page.sort": "startTime,asc",
+            }
+            response = await self._get("item", params=params)
+            paged = PagedResponse(**response)
+
+            for item in paged.content:
+                item_id = str(item.get("id", ""))
+                step_name = item.get("name", "")
+                step_status = item.get("status", "")
+
+                step_logs = ""
+                if item.get("hasLogs", False):
+                    logs, _ = await self.get_logs(item_id, page=0, size=50)
+                    step_logs = "\n".join(
+                        f"[{log.level}] {log.message}" for log in logs
+                    )
+
+                steps.append({
+                    "name": step_name,
+                    "status": step_status,
+                    "logs": step_logs,
+                    "id": item_id,
+                })
+
+            logger.debug(
+                "fetched_nested_steps",
+                parent_id=parent_item_id,
+                step_count=len(steps),
+            )
+        except Exception as e:
+            logger.debug("nested_steps_fetch_failed", error=str(e))
+
+        return steps
+
     async def post_comment(
         self,
         item_id: str,

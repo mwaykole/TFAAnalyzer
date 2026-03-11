@@ -162,6 +162,18 @@ async def investigate_failures(request: InvestigateRequest) -> InvestigateRespon
             )
             logger.info("code_fetcher_created", type="github", repo=settings.test_repo.repo)
     
+    # Create must-gather analyzer if enabled
+    must_gather_analyzer = None
+    if settings.is_must_gather_enabled():
+        from src.infrastructure.k8s.must_gather_analyzer import MustGatherAnalyzer
+        mg_path = request.must_gather_path or settings.must_gather.base_path
+        must_gather_analyzer = MustGatherAnalyzer(
+            base_path=mg_path,
+            max_log_lines=settings.must_gather.max_log_lines,
+            auto_detect=settings.must_gather.auto_detect,
+        )
+        logger.info("must_gather_analyzer_created", base_path=mg_path)
+    
     # Create and execute use case
     use_case = InvestigateRCAUseCase(
         failure_repo=rp_repo,
@@ -170,6 +182,7 @@ async def investigate_failures(request: InvestigateRequest) -> InvestigateRespon
         history_repo=rp_repo,
         verification_service=verification_service,
         code_fetcher=code_fetcher,
+        must_gather_analyzer=must_gather_analyzer,
     )
     
     use_case_request = UseCaseRequest(

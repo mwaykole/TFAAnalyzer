@@ -87,12 +87,14 @@ class VerificationService:
     def __init__(
         self,
         test_repo_path: str | None = None,
-        timeout: int = 300,
+        timeout: int = 0,
         command: str = "uv run pytest",
+        collect_must_gather: bool = True,
     ):
         self.test_repo_path = Path(test_repo_path) if test_repo_path else None
-        self.timeout = timeout
+        self.timeout = timeout or None  # 0 → None (no external timeout)
         self.command = command
+        self.collect_must_gather = collect_must_gather
     
     async def verify(
         self,
@@ -226,11 +228,9 @@ class VerificationService:
     async def run_test(self, test_name: str) -> VerificationResult:
         """Actually run the test using uv run pytest.
         
-        Args:
-            test_name: Name of test to execute
-            
-        Returns:
-            VerificationResult with execution outcome
+        The test's own internal timeout (TimeoutSampler, fixtures) controls
+        how long the test runs.  An external ``timeout`` is only applied when
+        explicitly configured (> 0) as a safety net.
         """
         if not self.test_repo_path or not self.test_repo_path.exists():
             logger.warning("test_repo_not_configured", 
@@ -241,20 +241,23 @@ class VerificationService:
                 reason="Test repository path not configured or doesn't exist",
             )
         
-        # Extract function name for -k filter
         func_name = test_name.split("::")[-1].split("[")[0] if "::" in test_name else test_name.split("[")[0]
+        
+        cmd = ["uv", "run", "pytest", "-k", func_name, "-v", "--tb=short", "-x"]
+        if self.collect_must_gather:
+            cmd.append("--collect-must-gather")
         
         logger.info("running_test_verification",
                     test_name=func_name[:50],
                     repo=str(self.test_repo_path),
-                    timeout=self.timeout)
+                    timeout=self.timeout or "test-owned",
+                    collect_must_gather=self.collect_must_gather)
         
         try:
-            # Run in thread pool to not block event loop
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    ["uv", "run", "pytest", "-k", func_name, "-v", "--tb=short", "-x"],
+                    cmd,
                     cwd=self.test_repo_path,
                     capture_output=True,
                     text=True,
@@ -263,32 +266,37 @@ class VerificationService:
                 )
             )
             
+            must_gather_path = self._find_must_gather_output(result.stdout)
+            
             if result.returncode == 0:
                 logger.info("test_verification_passed", test_name=func_name[:50])
                 return VerificationResult(
                     mode=VerifyMode.RUN_TEST,
                     status="passed",
-                    output=result.stdout,
+                    output=result.stdout[-2000:],
                     confidence=0.95,
                     reason="Test passed on re-run, confirming intermittent behavior",
                     details={
                         "exit_code": 0,
                         "passed_on_rerun": True,
+                        "must_gather_path": must_gather_path,
                     }
                 )
             else:
                 logger.info("test_verification_failed", 
                            test_name=func_name[:50],
-                           exit_code=result.returncode)
+                           exit_code=result.returncode,
+                           must_gather=must_gather_path or "not collected")
                 return VerificationResult(
                     mode=VerifyMode.RUN_TEST,
                     status="failed",
-                    output=result.stdout + "\n" + result.stderr,
+                    output=(result.stdout + "\n" + result.stderr)[-3000:],
                     confidence=0.0,
                     reason="Test failed on re-run, confirming consistent failure",
                     details={
                         "exit_code": result.returncode,
                         "passed_on_rerun": False,
+                        "must_gather_path": must_gather_path,
                     }
                 )
                 
@@ -300,7 +308,7 @@ class VerificationService:
                 mode=VerifyMode.RUN_TEST,
                 status="timeout",
                 output=f"Test execution timed out after {self.timeout}s",
-                reason=f"Test did not complete within {self.timeout}s timeout",
+                reason=f"Test did not complete within {self.timeout}s external timeout",
             )
         except Exception as e:
             logger.error("test_verification_error",
@@ -312,6 +320,12 @@ class VerificationService:
                 output=str(e),
                 reason=f"Error running test: {e}",
             )
+    
+    @staticmethod
+    def _find_must_gather_output(stdout: str) -> str | None:
+        """Extract must-gather artifact path from pytest output."""
+        match = re.search(r"must[_-]gather.*?(/\S+)", stdout)
+        return match.group(1) if match else None
     
     async def analyze_history(
         self,

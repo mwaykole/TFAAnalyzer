@@ -154,6 +154,14 @@ quick_rules:
     reason: "UI test race condition - element state changed during interaction"
     severity: "medium"
 
+  # Setup-phase timeout on K8s resource readiness
+  - name: "Setup phase timeout on wait_for_condition"
+    pattern: "failed on setup.*TimeoutExpiredError.*wait_for_condition"
+    classification: "Infrastructure Issue"
+    reason: "Test failed in setup waiting for K8s resource condition — platform resource not ready"
+    severity: "high"
+    additional_context: "Check must-gather for unhealthy pods, operator status, and resource failures"
+
   # Timeout issues from test framework
   - name: "TimeoutExpiredError from test"
     pattern: "TimeoutExpiredError.*wait_timeout|TimeoutSampler.*exceeded|polling.*timeout"
@@ -184,6 +192,54 @@ quick_rules:
     pattern: "reconcile.*error|controller.*failed|operator.*panic|CRD.*validation.*failed"
     classification: "product_bug"
     reason: "Operator failed to reconcile resource - likely a product bug"
+    severity: "high"
+
+  - name: "Missing CRD dependency"
+    pattern: "no matches for kind|no match for kind|CRD.*not.*installed|resource.*not.*found.*in.*group"
+    classification: "product_bug"
+    reason: "Required CRD not installed on cluster - component dependency missing"
+    severity: "critical"
+
+  - name: "LeaderWorkerSet CRD missing"
+    pattern: "LeaderWorkerSet.*not.*found|no matches.*LeaderWorkerSet|failed.*expected.*LWS"
+    classification: "product_bug"
+    reason: "LeaderWorkerSet CRD not installed - required for LLMD multi-node inference"
+    severity: "critical"
+
+  - name: "LLMD reconciliation failure"
+    pattern: "failed to reconcile.*workload|failed to build.*expected.*LWS|llminferenceservice.*failed"
+    classification: "product_bug"
+    reason: "LLMD operator failed to reconcile - check CR status conditions for details"
+    severity: "high"
+
+  - name: "KServe InferenceService failure"
+    pattern: "InferenceService.*not.*[Rr]eady|InferenceService.*[Ff]ailed|isvc.*not.*ready"
+    classification: "product_bug"
+    reason: "InferenceService failed to become ready - check ISVC status conditions and predictor pod"
+    severity: "high"
+
+  - name: "KServe revision failure"
+    pattern: "RevisionFailed|LatestCreatedRevision.*not.*[Rr]eady|revision.*failed"
+    classification: "product_bug"
+    reason: "Knative revision failed - model container crashed during startup"
+    severity: "high"
+
+  - name: "ServingRuntime misconfigured"
+    pattern: "ServingRuntime.*not.*found|runtime.*not.*supported|ClusterServingRuntime.*missing"
+    classification: "product_bug"
+    reason: "ServingRuntime not found or misconfigured for model format"
+    severity: "high"
+
+  - name: "Model storage initializer failure"
+    pattern: "storage-initializer.*failed|storage-initializer.*exit.*code|failed.*download.*model"
+    classification: "system_issue"
+    reason: "Model download failed - check S3/storage credentials and bucket access"
+    severity: "high"
+
+  - name: "Knative/Istio ingress not configured"
+    pattern: "IngressNotConfigured|ingress.*not.*ready|gateway.*not.*found"
+    classification: "system_issue"
+    reason: "Knative serving or Istio ingress not configured - service mesh issue"
     severity: "high"
 
   - name: "API server error"
@@ -297,6 +353,9 @@ component_context:
       - "Serverless mode requires Knative serving installed"
       - "InferenceService creation can take 2-10 minutes"
       - "Check Predictor, Transformer, Explainer pod statuses separately"
+      - "IMPORTANT: When ISVC times out, check .status.conditions for the REAL error"
+      - "Resource hierarchy: ISVC -> Predictor -> Revision/Deployment -> Pod -> Containers"
+      - "Key containers: storage-initializer (downloads model), kserve-container (runs inference), queue-proxy (Knative)"
     deployment_modes:
       serverless: "Knative-based, scales to zero, slower cold starts"
       raw_deployment: "Direct deployment, faster startup, no scale-to-zero"
@@ -304,6 +363,47 @@ component_context:
     timeout_expectations:
       isvc_ready: "2-10 minutes depending on model size"
       cold_start: "30s-5min for serverless cold starts"
+      model_download: "1-10 minutes depending on model size and S3 bandwidth"
+    cr_status_checks:
+      - condition: "Ready=False"
+        meaning: "ISVC not serving - check sub-conditions for why"
+      - condition: "PredictorReady=False"
+        meaning: "Predictor pod not running - check pod events"
+      - condition: "IngressReady=False"
+        meaning: "Knative route or Istio ingress misconfigured"
+      - condition: "LatestCreatedRevisionReady=False"
+        meaning: "Container failed to start - check kserve-container logs"
+    common_failures:
+      - pattern: "RevisionFailed"
+        likely_cause: "Model container crashed - check kserve-container logs for OOM, model format, or config error"
+      - pattern: "storage-initializer.*exit"
+        likely_cause: "S3 credentials wrong, bucket not found, or model path incorrect"
+      - pattern: "IngressNotConfigured"
+        likely_cause: "Knative serving or Istio not properly installed"
+
+  llmd:
+    notes:
+      - "LLM Distributed (LLMD) for multi-node LLM inference"
+      - "Uses LLMInferenceService CRD (not standard InferenceService)"
+      - "Requires LeaderWorkerSet (LWS) CRD as a dependency"
+      - "If LWS CRD is missing, LLMD reconciliation fails immediately"
+      - "LLMD creates LeaderWorkerSet to manage multi-node pods (leader + workers)"
+      - "Check LLMInferenceService .status.conditions for reconciliation errors"
+    resource_hierarchy: "LLMInferenceService -> LeaderWorkerSet -> Pods (leader + workers)"
+    dependencies:
+      - "LeaderWorkerSet CRD (leaderworkerset.x-k8s.io/v1)"
+      - "KServe operator"
+      - "GPU nodes for each worker"
+    common_failures:
+      - pattern: "no matches for kind.*LeaderWorkerSet"
+        likely_cause: "LWS CRD not installed on cluster - CRITICAL dependency missing"
+        classification: "product_bug"
+      - pattern: "failed to reconcile multi-node"
+        likely_cause: "LLMD controller cannot create worker set - check CR status"
+        classification: "product_bug"
+      - pattern: "worker.*not.*ready|leader.*not.*ready"
+        likely_cause: "Worker/leader pod scheduling or startup failure"
+        classification: "system_issue"
 
   modelmesh:
     notes:
@@ -325,6 +425,36 @@ component_context:
       - "LlamaStack operator for LLM orchestration"
       - "Requires significant GPU resources"
       - "Long startup times for large models"
+
+  serving_runtimes:
+    notes:
+      - "ServingRuntime defines which model server to use (vLLM, TGI, Caikit, etc.)"
+      - "ClusterServingRuntime is cluster-scoped, ServingRuntime is namespace-scoped"
+      - "Runtime must support the model format (ONNX, PyTorch, SafeTensors, etc.)"
+      - "Misconfigured runtime = InferenceService stays NotReady"
+    common_failures:
+      - pattern: "runtime.*not.*found|ServingRuntime.*not.*found"
+        likely_cause: "ServingRuntime CR missing or name mismatch in InferenceService spec"
+      - pattern: "model.*format.*not.*supported"
+        likely_cause: "Runtime does not support this model format"
+
+  rhoai_operators:
+    notes:
+      - "RHOAI operator manages DataScienceCluster (DSC) and DSCInitialization (DSCI)"
+      - "DSC .status.conditions shows which components are Ready/Degraded"
+      - "If DSC component is degraded, all tests for that component will fail"
+      - "Operator pod in redhat-ods-operator namespace"
+      - "Component pods in redhat-ods-applications namespace"
+    namespaces:
+      operator: "redhat-ods-operator"
+      applications: "redhat-ods-applications"
+      monitoring: "redhat-ods-monitoring"
+      notebooks: "rhods-notebooks"
+    common_failures:
+      - pattern: "DSC.*not.*ready|DataScienceCluster.*degraded"
+        likely_cause: "RHOAI operator failed to reconcile a component"
+      - pattern: "component.*degraded|component.*not.*available"
+        likely_cause: "Specific RHOAI component not healthy"
 
   workbenches:
     notes:
@@ -449,6 +579,31 @@ correlation_patterns:
       - "timeout.*dial"
     interpretation: "Network connectivity issue - affects external service access"
     recommendation: "Check DNS, service mesh, and network policies"
+
+  kserve_cr_chain_failure:
+    indicators:
+      - "InferenceService.*not.*ready"
+      - "RevisionFailed"
+      - "LatestCreatedRevision.*not.*ready"
+      - "failed to reconcile"
+    interpretation: "KServe resource chain failure - check ISVC -> Predictor -> Pod status conditions"
+    recommendation: "Inspect CR .status.conditions for the actual error message, not just the timeout"
+
+  missing_crd_dependency:
+    indicators:
+      - "no matches for kind"
+      - "CRD.*not.*found"
+      - "resource.*not.*registered"
+    interpretation: "Required CRD not installed - product dependency missing"
+    recommendation: "Check if the required operator/CRD is installed on the cluster"
+
+  model_serving_cascade:
+    indicators:
+      - "storage-initializer.*failed"
+      - "InferenceService.*not.*ready"
+      - "model.*not.*loaded"
+    interpretation: "Model serving cascade failure - typically starts with model download or runtime issue"
+    recommendation: "Check S3 credentials, model path, ServingRuntime configuration"
 
 # -----------------------------------------------------------------------------
 # Settings

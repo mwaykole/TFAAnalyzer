@@ -94,7 +94,7 @@ class LLMProvider(ABC):
         system = loader.load("investigation/critic_system.md")
         prompt = loader.render(
             "investigation/critic_user.md",
-            initial_rca=initial_rca[:500],
+            initial_rca=initial_rca[:1000],
             context=context,
         )
         
@@ -102,7 +102,8 @@ class LLMProvider(ABC):
         return response.content
     
     async def refine(
-        self, initial_rca: str, critique: str, evidence_summary: str
+        self, initial_rca: str, critique: str, evidence_summary: str,
+        patterns: str = "", suggested_confidence: str = "60%",
     ) -> str:
         """Refiner step: Produce final RCA.
         
@@ -112,11 +113,11 @@ class LLMProvider(ABC):
         system = loader.load("investigation/refiner_system.md")
         prompt = loader.render(
             "investigation/refiner_user.md",
-            initial_rca=initial_rca[:400],
-            critique=critique[:300],
+            initial_rca=initial_rca[:800],
+            critique=critique[:500],
             error_message=evidence_summary,
-            patterns="See evidence summary",
-            suggested_confidence="60%",
+            patterns=patterns or "See evidence summary",
+            suggested_confidence=suggested_confidence,
         )
         
         response = await self.analyze(system, prompt)

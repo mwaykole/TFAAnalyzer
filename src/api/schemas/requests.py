@@ -106,6 +106,10 @@ class InvestigateRequest(BaseModel):
     
     provider: str = Field("claude-cli", description="LLM provider to use")
     
+    must_gather_path: str | None = Field(
+        None, description="Path to must-gather artifacts (overrides config base_path)"
+    )
+    
     @field_validator('launch_id', mode='before')
     @classmethod
     def parse_launch_id(cls, v: str) -> str:

@@ -46,6 +46,17 @@ class FailureRepository(ABC):
         """Check if test already has AI classification."""
         pass
 
+    async def get_launch_failure_summary(
+        self, launch_id: str, sample_size: int = 20,
+    ) -> dict[str, Any]:
+        """Sample failures across the entire launch to detect cross-component patterns.
+
+        Returns a dict with keys like ``total_failed``, ``setup_timeout_count``,
+        ``login_failure_count``, ``sample_errors``, and ``launch_health``.
+        Implementations may return an empty dict if unsupported.
+        """
+        return {}
+
 
 class CacheRepository(ABC):
     """Interface for caching layer.

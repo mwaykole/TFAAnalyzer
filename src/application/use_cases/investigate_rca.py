@@ -10,9 +10,11 @@ Enhanced with:
 - Pre-error log extraction for better context
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.domain.entities.classification import FailureCategory
 from src.domain.entities.failure import Failure
 from src.domain.entities.rca import RCA
 from src.domain.interfaces.repositories import (
@@ -41,7 +43,9 @@ from src.utils.logging import get_logger
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
+    from src.domain.entities.evidence import Evidence
     from src.infrastructure.embeddings.failure_store import FailureEmbeddingStore
+    from src.infrastructure.k8s.must_gather_analyzer import MustGatherAnalyzer
 
 logger = get_logger(__name__)
 
@@ -121,6 +125,7 @@ class InvestigateRCAUseCase:
         verification_service: VerificationService | None = None,
         code_fetcher: CodeFetcher | None = None,
         failure_store: "FailureEmbeddingStore | None" = None,
+        must_gather_analyzer: "MustGatherAnalyzer | None" = None,
     ):
         """Initialize with dependencies."""
         self._failure_repo = failure_repo
@@ -130,6 +135,7 @@ class InvestigateRCAUseCase:
         self._verification_service = verification_service
         self._code_fetcher = code_fetcher
         self._failure_store = failure_store
+        self._must_gather_analyzer = must_gather_analyzer
         
         self._classifier = ClassificationService()
         self._investigator = InvestigationService(
@@ -137,6 +143,7 @@ class InvestigateRCAUseCase:
             self._classifier,
             failure_store=failure_store,
         )
+        self._verification_semaphore: asyncio.Semaphore | None = None
     
     async def execute(self, request: InvestigateRequest) -> list[InvestigateResponse]:
         """Execute the investigation use case.
@@ -165,6 +172,26 @@ class InvestigateRCAUseCase:
             )
         
         logger.info("failures_found", count=len(failures))
+        
+        # =========================================================
+        # Launch-wide failure scan for cross-component patterns
+        # =========================================================
+        launch_summary: dict[str, Any] = {}
+        try:
+            launch_summary = await self._failure_repo.get_launch_failure_summary(
+                request.launch_id,
+            )
+            if launch_summary:
+                logger.info(
+                    "launch_summary",
+                    total_failed=launch_summary.get("total_failed"),
+                    failure_rate=launch_summary.get("failure_rate"),
+                    setup_timeouts=launch_summary.get("setup_timeout_count"),
+                    login_failures=launch_summary.get("login_failure_count"),
+                    launch_health=launch_summary.get("launch_health"),
+                )
+        except Exception as e:
+            logger.debug("launch_summary_failed", error=str(e))
         
         # =========================================================
         # ENHANCED: Run failure clustering to detect systemic issues
@@ -204,53 +231,83 @@ class InvestigateRCAUseCase:
         
         # Group by error signature for efficiency
         signature_groups = self._group_by_signature(failures)
+        num_groups = len(signature_groups)
         logger.info("grouped_by_signature", 
-                    unique_signatures=len(signature_groups),
+                    unique_signatures=num_groups,
                     total_failures=len(failures))
         
-        group_num = 0
-        for signature, group in signature_groups.items():
-            group_num += 1
-            logger.info("investigating_group",
-                        group=f"{group_num}/{len(signature_groups)}",
-                        signature=signature[:12],
-                        failures_in_group=len(group),
-                        test_name=group[0].test_name[:40])
-            
-            # Get cluster info for this failure
-            cluster_info = cluster_map.get(group[0].id)
-            
-            # Investigate first failure in group
-            first_result = await self._investigate_single(
-                group[0], 
-                request, 
-                cluster_info=cluster_info,
-            )
-            
-            logger.info("investigation_result",
-                        test_name=group[0].test_name[:30],
-                        classification=first_result.rca.classification.category.value,
-                        confidence=f"{first_result.rca.confidence:.0%}",
-                        calibrated=f"{first_result.calibrated_confidence:.0%}" if first_result.calibrated_confidence else "N/A",
-                        severity=first_result.rca.severity.value)
-            
-            results.append(first_result)
-            
-            # Reuse RCA for similar failures
-            for failure in group[1:]:
-                logger.debug("reusing_rca", 
-                             test_name=failure.test_name[:30],
-                             same_signature=signature[:12])
-                results.append(InvestigateResponse(
-                    test_name=failure.test_name,
-                    test_id=failure.id,
-                    rca=first_result.rca,
-                    verified=first_result.verified,
-                    verification_result=first_result.verification_result,
-                    cluster_info=cluster_map.get(failure.id),
-                    calibrated_confidence=first_result.calibrated_confidence,
-                    confidence_explanation=first_result.confidence_explanation,
-                ))
+        max_concurrent = min(num_groups, 5)
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        if self._verification_service and request.verify_mode != VerifyMode.NONE:
+            from src.utils.config import Settings
+            try:
+                settings = Settings()
+                max_verify = settings.verification.max_parallel
+            except Exception:
+                max_verify = 1
+            self._verification_semaphore = asyncio.Semaphore(max_verify)
+            logger.info("verification_concurrency", max_parallel=max_verify)
+        
+        async def _investigate_group(
+            group_num: int,
+            signature: str,
+            group: list[Failure],
+        ) -> list[InvestigateResponse]:
+            async with semaphore:
+                logger.info("investigating_group",
+                            group=f"{group_num}/{num_groups}",
+                            signature=signature[:12],
+                            failures_in_group=len(group),
+                            test_name=group[0].test_name[:40])
+                
+                cluster_info = cluster_map.get(group[0].id)
+                
+                first_result = await self._investigate_single(
+                    group[0], request,
+                    cluster_info=cluster_info,
+                    launch_summary=launch_summary,
+                )
+                
+                logger.info("investigation_result",
+                            test_name=group[0].test_name[:30],
+                            classification=first_result.rca.classification.category.value,
+                            confidence=f"{first_result.rca.confidence:.0%}",
+                            calibrated=f"{first_result.calibrated_confidence:.0%}" if first_result.calibrated_confidence else "N/A",
+                            severity=first_result.rca.severity.value)
+                
+                group_results = [first_result]
+                for failure in group[1:]:
+                    logger.debug("reusing_rca", 
+                                 test_name=failure.test_name[:30],
+                                 same_signature=signature[:12])
+                    group_results.append(InvestigateResponse(
+                        test_name=failure.test_name,
+                        test_id=failure.id,
+                        rca=first_result.rca,
+                        verified=first_result.verified,
+                        verification_result=first_result.verification_result,
+                        cluster_info=cluster_map.get(failure.id),
+                        calibrated_confidence=first_result.calibrated_confidence,
+                        confidence_explanation=first_result.confidence_explanation,
+                    ))
+                return group_results
+        
+        tasks = [
+            _investigate_group(i + 1, sig, grp)
+            for i, (sig, grp) in enumerate(signature_groups.items())
+        ]
+        
+        if num_groups > 1:
+            logger.info("parallel_investigation", groups=num_groups, concurrency=max_concurrent)
+        
+        group_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for gr in group_results:
+            if isinstance(gr, Exception):
+                logger.error("group_investigation_failed", error=str(gr))
+                continue
+            results.extend(gr)
         
         logger.info("investigation_complete", 
                     total_results=len(results),
@@ -268,6 +325,7 @@ class InvestigateRCAUseCase:
         failure: Failure, 
         request: InvestigateRequest,
         cluster_info: dict[str, Any] | None = None,
+        launch_summary: dict[str, Any] | None = None,
     ) -> InvestigateResponse:
         """Investigate a single failure with full Thinker-Critic pattern.
         
@@ -296,6 +354,37 @@ class InvestigateRCAUseCase:
         # Add pre-error context to evidence
         if pre_error_logs:
             evidence.pre_error_context = pre_error_logs
+        
+        if "failed on setup" in failure.logs.lower():
+            evidence.failed_on_setup = True
+        
+        if launch_summary:
+            ls_health = launch_summary.get("launch_health", "")
+            if ls_health == "degraded" and not evidence.cluster_health:
+                evidence.cluster_health = "degraded"
+            login_fails = launch_summary.get("login_failure_count", 0)
+            setup_tos = launch_summary.get("setup_timeout_count", 0)
+            rate = launch_summary.get("failure_rate", 0)
+            total_f = launch_summary.get("total_failed", 0)
+            parts = []
+            parts.append(
+                f"Launch-wide: {total_f} failures "
+                f"({rate:.0%} failure rate)"
+            )
+            if login_fails:
+                parts.append(
+                    f"{login_fails} cross-component login/auth failures detected"
+                )
+            if setup_tos:
+                parts.append(
+                    f"{setup_tos} cross-component setup timeouts detected"
+                )
+            if parts:
+                launch_ctx = "; ".join(parts)
+                existing = evidence.pre_error_context or ""
+                evidence.pre_error_context = (
+                    f"LAUNCH CONTEXT: {launch_ctx}\n{existing}"
+                )
         
         logger.debug("evidence_extracted",
                      error_type=evidence.error_type or "unknown",
@@ -361,13 +450,25 @@ class InvestigateRCAUseCase:
                         test_name=failure.test_name[:30],
                         mode=verify_mode.value)
             
-            verification_result = await self._verification_service.verify(
-                test_name=failure.test_name,
-                mode=verify_mode,
-                logs=failure.logs,
-                test_code=failure.test_code,
-                history=history,
-            )
+            if self._verification_semaphore:
+                async with self._verification_semaphore:
+                    logger.info("verification_slot_acquired",
+                                test_name=failure.test_name[:30])
+                    verification_result = await self._verification_service.verify(
+                        test_name=failure.test_name,
+                        mode=verify_mode,
+                        logs=failure.logs,
+                        test_code=failure.test_code,
+                        history=history,
+                    )
+            else:
+                verification_result = await self._verification_service.verify(
+                    test_name=failure.test_name,
+                    mode=verify_mode,
+                    logs=failure.logs,
+                    test_code=failure.test_code,
+                    history=history,
+                )
             
             logger.info("verification_complete",
                         test_name=failure.test_name[:30],
@@ -393,6 +494,49 @@ class InvestigateRCAUseCase:
             logger.debug("cluster_context_added", 
                          root_cause=cluster_info.get("likely_root_cause"))
         
+        # =========================================================
+        # ENHANCED: Must-gather cluster state analysis
+        # Priority: verification-collected must-gather > startup must-gather
+        # =========================================================
+        mg_report = None
+        verify_mg_path = (
+            verification_result.details.get("must_gather_path")
+            if verification_result else None
+        )
+
+        if verify_mg_path:
+            from src.infrastructure.k8s.must_gather_analyzer import MustGatherAnalyzer
+            try:
+                live_analyzer = MustGatherAnalyzer(
+                    base_path=verify_mg_path,
+                    auto_detect=False,
+                )
+                mg_report = live_analyzer.analyze()
+                logger.info("verification_must_gather_analyzed",
+                            path=verify_mg_path,
+                            cluster_health=mg_report.cluster_health,
+                            unhealthy_pods=len(mg_report.unhealthy_pods),
+                            resource_failures=len(mg_report.resource_failures))
+            except Exception as e:
+                logger.warning("verification_must_gather_failed", error=str(e))
+
+        if mg_report is None and self._must_gather_analyzer:
+            try:
+                mg_report = self._must_gather_analyzer.analyze(
+                    test_name=failure.test_name,
+                )
+            except Exception as e:
+                logger.warning("must_gather_analysis_failed", error=str(e))
+
+        if mg_report and mg_report.cluster_health != "unknown":
+            evidence.must_gather_context = mg_report.to_context()
+            evidence.cluster_health = mg_report.cluster_health
+            logger.info("must_gather_analyzed",
+                        test_name=failure.test_name[:30],
+                        cluster_health=mg_report.cluster_health,
+                        unhealthy_pods=len(mg_report.unhealthy_pods),
+                        warning_events=len(mg_report.warning_events))
+        
         # Run full investigation with Thinker-Critic
         logger.info("running_thinker_critic", test_name=failure.test_name[:30])
         logger.debug("llm_step", step="THINKER", status="starting")
@@ -416,9 +560,9 @@ class InvestigateRCAUseCase:
             evidence_strength=evidence_strength,
             has_timeout_analysis=timeout_analysis is not None,
             has_cluster_match=cluster_info is not None,
-            has_similar_failures=False,  # Will be added in Phase 2
-            verification_result="confirmed" if verification_result and verification_result.status == "passed" else (
-                "contradicted" if verification_result and verification_result.status == "failed" else None
+            has_similar_failures=self._check_similar_failures(failure, evidence),
+            verification_result=self._map_verification_status(
+                verification_result, rca.classification.category
             ),
         )
         
@@ -458,32 +602,110 @@ class InvestigateRCAUseCase:
             confidence_explanation=calibration.explanation,
         )
     
+    def _check_similar_failures(self, failure, evidence) -> bool:
+        """Check if similar past failures exist in the embedding store."""
+        if not self._failure_store:
+            return False
+        try:
+            return bool(self._failure_store.find_similar(
+                test_name=failure.test_name,
+                error_type=evidence.error_type or "",
+                error_message=evidence.error_message or "",
+                k=1,
+            ))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _map_verification_status(
+        verification_result: VerificationResult | None,
+        category: FailureCategory | None = None,
+    ) -> str | None:
+        """Map verification result to calibration category.
+
+        Context-aware: for Product Bug / Infrastructure Issue, a re-run
+        failure *confirms* the persistent issue (boost confidence).  Only
+        for Intermittent Failure does a re-run failure contradict the
+        classification (we expected it to pass sometimes).
+        """
+        if not verification_result:
+            return None
+
+        status = verification_result.status
+        is_persistent_category = category in (
+            FailureCategory.PRODUCT_BUG,
+            FailureCategory.INFRASTRUCTURE_ISSUE,
+            FailureCategory.TEST_AUTOMATION_ISSUE,
+        )
+
+        if status == "passed":
+            if is_persistent_category:
+                return "contradicted"
+            return "confirmed"
+
+        if status == "failed":
+            if is_persistent_category:
+                return "confirmed"
+            return "contradicted"
+
+        static_mapping = {
+            "flaky": "weak_confirm",
+            "consistent_fail": "confirmed" if is_persistent_category else "strong_contradict",
+            "rare_failure": "weak_confirm",
+            "timeout": "inconclusive",
+        }
+        return static_mapping.get(status)
+
     def _assess_evidence_strength(self, evidence) -> str:
-        """Assess the strength of evidence for calibration."""
+        """Assess the strength of evidence for calibration.
+
+        Uses weighted scoring where definitive signals (e.g., CrashLoopBackOff pattern)
+        count more than generic ones (e.g., "has an error message").
+        """
         score = 0
-        
-        # Strong indicators
-        if evidence.patterns and len(evidence.patterns) > 0:
-            score += 2
+
+        if evidence.patterns:
+            definitive_keywords = {
+                "crashloopbackoff", "oomkilled", "imagepullbackoff",
+                "aws credentials", "gpu", "scheduling",
+                "service mesh", "authentication",
+            }
+            has_definitive = any(
+                any(kw in p.lower() for kw in definitive_keywords)
+                for p in evidence.patterns
+            )
+            score += 4 if has_definitive else 2
+
         if evidence.stack_trace and len(evidence.stack_trace) > 100:
             score += 2
         if evidence.error_type:
             score += 1
         if evidence.error_message:
             score += 1
-        
-        # Bonus for additional context
+
         if hasattr(evidence, 'pre_error_context') and evidence.pre_error_context:
             score += 1
         if hasattr(evidence, 'test_code') and evidence.test_code:
             score += 1
-        if evidence.known_flaky is not None:
+
+        if evidence.must_gather_context:
+            has_unhealthy = "unhealthy" in evidence.must_gather_context.lower()
+            score += 3 if has_unhealthy else 2
+
+        if evidence.verification_result == "passed":
+            score += 2
+        elif evidence.verification_result == "failed":
             score += 1
-        
-        # Map score to strength
-        if score >= 7:
+
+        if evidence.historical_pass_rate < 1.0:
+            score += 1
+
+        if evidence.timeout_value:
+            score += 1
+
+        if score >= 9:
             return "definitive"
-        elif score >= 5:
+        elif score >= 6:
             return "strong"
         elif score >= 3:
             return "moderate"
@@ -607,6 +829,14 @@ class InvestigateRCAUseCase:
         evidence.uses_sleep = code_info.uses_sleep
         evidence.wait_patterns = code_info.wait_patterns
         evidence.parametrize_args = code_info.parametrize_args
+
+        # Fallback: extract timeout value from error message if AST didn't find it
+        if not evidence.timeout_value and evidence.error_message:
+            import re
+            m = re.search(r'(\d{2,4})\s*(?:seconds?|s)\b', evidence.error_message)
+            if m:
+                evidence.timeout_value = int(m.group(1))
+                evidence.has_timeout = True
         
         # Update known_flaky based on code analysis
         if code_info.is_potentially_flaky:

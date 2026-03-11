@@ -50,7 +50,7 @@ src/
 │   ├── entities/              # Business objects
 │   │   ├── failure.py         # Failure entity
 │   │   ├── classification.py  # Classification, FailureCategory, Severity
-│   │   ├── evidence.py        # Evidence collected from logs
+│   │   ├── evidence.py        # Evidence collected from logs, code, cluster state
 │   │   └── rca.py             # Root Cause Analysis result
 │   ├── interfaces/            # Abstract interfaces (DIP)
 │   │   ├── repositories.py    # FailureRepository, CacheRepository, HistoryRepository
@@ -59,33 +59,45 @@ src/
 │   │   ├── notifier.py        # Notifier interface
 │   │   └── log_parser.py      # LogParser interface
 │   └── services/              # Domain services
-│       ├── classification_service.py  # Rule-based classification
-│       ├── investigation_service.py   # Thinker-Critic pattern
-│       └── verification_service.py    # Test verification
+│       ├── classification_service.py  # Rule-based classification + knowledge base
+│       ├── investigation_service.py   # Thinker-Critic-Refiner LLM pattern
+│       ├── verification_service.py    # Test re-run + history analysis
+│       └── enhanced_analysis.py       # Timeout analysis, failure clustering, calibration
 │
 ├── application/               # Use cases (orchestration)
 │   └── use_cases/
-│       ├── analyze_failure.py     # Quick analysis flow
-│       └── investigate_rca.py     # Deep investigation flow
+│       ├── analyze_failure.py     # Fast-path rule-based classification
+│       └── investigate_rca.py     # Deep-path: evidence + LLM + verify + must-gather
 │
-├── infrastructure/            # External integrations
+├── infrastructure/            # External integrations (adapters)
 │   ├── llm/                   # LLM adapters
 │   │   ├── llm_factory.py     # Factory pattern for providers
 │   │   ├── claude_adapter.py  # Claude CLI adapter
+│   │   ├── anthropic_adapter.py # Anthropic API adapter
 │   │   ├── groq_adapter.py    # Groq API adapter
 │   │   └── ollama_adapter.py  # Ollama adapter
 │   ├── cache/                 # Caching
 │   │   ├── redis_cache.py     # Redis implementation
 │   │   └── memory_cache.py    # In-memory implementation
-│   ├── code_fetcher/          # Test code fetching
+│   ├── code_fetcher/          # Test code fetching + analysis
 │   │   ├── github_adapter.py  # GitHub API fetcher
 │   │   ├── local_adapter.py   # Local filesystem fetcher
 │   │   └── test_parser.py     # AST-based test parser
-│   ├── notifications/         # Team notifications
-│   │   ├── slack_notifier.py  # Slack webhook
-│   │   └── teams_notifier.py  # Teams webhook
-│   └── repositories/          # Data repositories
-│       └── rp_repository.py   # ReportPortal adapter
+│   ├── reportportal/          # ReportPortal client
+│   │   ├── client.py          # RP API client (retries, nested step logs)
+│   │   ├── component_fetcher.py # Fetch component failures
+│   │   └── models.py          # RP data models
+│   ├── repositories/          # Data repositories
+│   │   └── rp_repository.py   # FailureRepository + HistoryRepository + launch scan
+│   ├── k8s/                   # Kubernetes / OpenShift diagnostics
+│   │   ├── must_gather_parser.py   # Low-level must-gather dir/zip parser
+│   │   └── must_gather_analyzer.py # High-level CR, pod, event analysis
+│   ├── embeddings/            # Few-shot learning
+│   │   ├── text_embedder.py   # Text embedding
+│   │   └── failure_store.py   # Past failure storage for similarity hints
+│   └── notifications/         # Team notifications
+│       ├── slack_notifier.py  # Slack webhook
+│       └── teams_notifier.py  # Teams webhook
 │
 ├── api/                       # FastAPI server
 │   ├── server.py              # App setup and lifespan
@@ -99,20 +111,20 @@ src/
 │   ├── middleware/            # Middleware
 │   │   └── error_handler.py
 │   ├── dependencies.py        # Dependency injection
-│   └── client.py              # API client for CLI
+│   └── client.py              # API client for CLI --server mode
 │
-├── rp/                        # ReportPortal client (legacy)
-│   ├── client.py              # RP API client
-│   ├── component_fetcher.py   # Fetch component failures
-│   └── test_history.py        # History fetcher
-│
-├── investigator.py            # Legacy RCA investigator (still used by CLI)
+├── prompts/                   # LLM prompt templates (Markdown)
+│   ├── investigation/         # Thinker, Critic, Refiner, Evidence prompts
+│   ├── system/                # System prompts
+│   └── context/               # RHOAI/KServe knowledge base prompt
 │
 └── utils/                     # Utilities
-    ├── config.py              # Configuration management
-    ├── logging.py             # Structured logging
+    ├── config.py              # Configuration management (pydantic-settings)
+    ├── logging.py             # Structured logging (structlog)
     ├── metrics.py             # Analysis metrics
-    └── knowledge_base.py      # Domain knowledge
+    ├── knowledge_base.py      # Domain knowledge loader + quick rule matcher
+    ├── retry.py               # Retry logic
+    └── ui.py                  # Rich console output helpers
 ```
 
 ## Core Concepts
@@ -321,11 +333,13 @@ pytest tests/test_domain_services.py::TestClassificationService -v
 
 ```
 tests/
-├── test_domain_entities.py    # Entity tests
-├── test_domain_services.py    # Service tests
-├── test_infrastructure.py     # Adapter tests
-├── test_api.py                # API endpoint tests
-└── test_metrics.py            # Metrics tests
+├── test_classification_fixes.py  # Classification, deep-mode, hint section, prompt tests
+├── test_must_gather.py           # Must-gather parser + analyzer tests
+├── test_domain_entities.py       # Entity tests
+├── test_domain_services.py       # Service tests
+├── test_infrastructure.py        # Adapter tests
+├── test_api.py                   # API endpoint tests
+└── test_metrics.py               # Metrics tests
 ```
 
 ### Writing Tests

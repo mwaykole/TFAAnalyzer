@@ -33,12 +33,10 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Annotated, TYPE_CHECKING
+from typing import Annotated
 
 import typer
 
-if TYPE_CHECKING:
-    from src.investigator import RCA
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
@@ -118,7 +116,7 @@ def list_launches(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    from src.rp import ReportPortalClient
+    from src.infrastructure.reportportal import ReportPortalClient
 
     async def fetch_launches() -> None:
         rp_client = ReportPortalClient(
@@ -200,7 +198,7 @@ def component_logs(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    from src.rp import fetch_component_logs
+    from src.infrastructure.reportportal import fetch_component_logs
 
     async def fetch() -> None:
         result = await fetch_component_logs(
@@ -293,8 +291,8 @@ def test_history(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    from src.rp import fetch_component_logs
-    from src.rp import fetch_test_history
+    from src.infrastructure.reportportal import fetch_component_logs
+    from src.infrastructure.reportportal import fetch_test_history
 
     async def fetch() -> None:
         result = await fetch_component_logs(
@@ -360,7 +358,7 @@ def stats(
     """Show analysis statistics and trends from stored history."""
     setup_logging(level="WARNING", log_format="console")
 
-    from src.storage.sqlite_store import AnalysisStore
+    from src.infrastructure.storage.sqlite_store import AnalysisStore
 
     if not db_path.exists():
         console.print("[yellow]No analysis history found. Run some analyses first.[/yellow]")
@@ -441,7 +439,7 @@ def accuracy_report(
     """Show accuracy metrics and classification report."""
     setup_logging(level="WARNING", log_format="console")
     
-    from src.storage.sqlite_store import AnalysisStore
+    from src.infrastructure.storage.sqlite_store import AnalysisStore
     
     if not db_path.exists():
         console.print("[yellow]No analysis history found. Run some analyses first.[/yellow]")
@@ -521,7 +519,7 @@ def record_feedback(
     """
     setup_logging(level="WARNING", log_format="console")
     
-    from src.storage.sqlite_store import AnalysisStore
+    from src.infrastructure.storage.sqlite_store import AnalysisStore
     
     if not db_path.exists():
         console.print("[red]Database not found[/red]")
@@ -617,7 +615,209 @@ def parse_logs(
 
 
 # =============================================================================
-# RCA INVESTIGATION (Thinker-Critic Pattern)
+# DEEP INVESTIGATION (shared by analyze --deep and investigate alias)
+# =============================================================================
+
+
+def _run_deep_analysis(
+    launch_id: str,
+    component: str,
+    settings,
+    provider: str,
+    post_to_rp: bool,
+    json_output: bool,
+    verify: bool = False,
+    analyze_history: bool = False,
+    must_gather_path: str | None = None,
+) -> None:
+    """Run deep LLM-powered investigation using InvestigateRCAUseCase.
+
+    Shared implementation for both ``analyze --deep`` and ``investigate``.
+    """
+    from src.utils.ui import CLASSIFICATION_ICONS, SEVERITY_ICONS
+    from src.utils.metrics import start_metrics, finish_metrics
+    from src.domain.services.verification_service import VerificationService, VerifyMode
+    from src.domain.interfaces.notifier import AnalysisSummary
+    from src.application.use_cases.investigate_rca import (
+        InvestigateRCAUseCase,
+        InvestigateRequest as UseCaseRequest,
+    )
+    from src.infrastructure.repositories.rp_repository import RPRepository
+
+    # Determine verification mode
+    if verify and analyze_history:
+        verify_mode = VerifyMode.ALL
+    elif verify:
+        verify_mode = VerifyMode.RUN_TEST
+    elif analyze_history:
+        verify_mode = VerifyMode.ANALYZE_HISTORY
+    else:
+        verify_mode = VerifyMode.NONE
+
+    log_step("Initializing LLM provider", provider=provider)
+    llm_provider = _get_llm_provider(provider, settings)
+    if not llm_provider:
+        console.print(f"[yellow]Warning:[/yellow] LLM ({provider}) not available")
+        raise typer.Exit(1)
+    log_debug("LLM provider initialized", model=getattr(llm_provider, 'model_name', 'unknown'))
+
+    # Create verification service if needed
+    verification_service = None
+    if verify_mode != VerifyMode.NONE:
+        test_repo_path = None
+        if settings.test_repo.enabled and settings.test_repo.local_path:
+            test_repo_path = settings.test_repo.local_path
+
+        verification_service = VerificationService(
+            test_repo_path=test_repo_path,
+            timeout=settings.verification.timeout_per_test,
+            collect_must_gather=settings.verification.collect_must_gather,
+        )
+        log_step(f"Verification mode: {verify_mode.value}",
+                 repo=test_repo_path if test_repo_path else "not configured")
+
+    # Create code fetcher for test source analysis
+    code_fetcher = None
+    if settings.is_code_fetcher_enabled():
+        from pathlib import Path
+        if settings.test_repo.local_path:
+            from src.infrastructure.code_fetcher.local_adapter import LocalCodeFetcher
+            code_fetcher = LocalCodeFetcher(
+                base_path=Path(settings.test_repo.local_path),
+                github_repo=settings.test_repo.repo,
+                github_branch=settings.test_repo.branch,
+            )
+            log_step("Code fetcher: local", path=settings.test_repo.local_path)
+        elif settings.test_repo.repo:
+            from src.infrastructure.code_fetcher.github_adapter import GitHubCodeFetcher
+            code_fetcher = GitHubCodeFetcher(
+                repo=settings.test_repo.repo,
+                branch=settings.test_repo.branch,
+                token=settings.get_github_token(),
+                test_dir=settings.test_repo.test_dir,
+                cache_dir=Path(settings.test_repo.cache_dir),
+            )
+            log_step("Code fetcher: GitHub", repo=settings.test_repo.repo)
+
+    # Create notifiers for team alerts
+    notifiers = []
+    if settings.is_notifications_enabled():
+        if settings.get_slack_webhook():
+            from src.infrastructure.notifications.slack_notifier import SlackNotifier
+            notifiers.append(SlackNotifier(settings.get_slack_webhook()))
+            log_step("Notifications: Slack enabled")
+        if settings.get_teams_webhook():
+            from src.infrastructure.notifications.teams_notifier import TeamsNotifier
+            notifiers.append(TeamsNotifier(settings.get_teams_webhook()))
+            log_step("Notifications: Teams enabled")
+
+    # Create must-gather analyzer if enabled or path provided
+    mg_analyzer = None
+    mg_base = must_gather_path or (settings.must_gather.base_path if settings.is_must_gather_enabled() else None)
+    if mg_base:
+        from src.infrastructure.k8s.must_gather_analyzer import MustGatherAnalyzer
+        mg_analyzer = MustGatherAnalyzer(
+            base_path=mg_base,
+            max_log_lines=settings.must_gather.max_log_lines,
+            auto_detect=settings.must_gather.auto_detect,
+        )
+        log_step("Must-gather analyzer enabled", base_path=mg_base)
+
+    # Start metrics tracking
+    metrics = start_metrics(model=getattr(llm_provider, 'model_name', 'unknown'), provider=provider)
+
+    # Initialize few-shot learning store
+    failure_store = None
+    try:
+        from src.infrastructure.embeddings.failure_store import FailureEmbeddingStore
+        cache_dir = Path(settings.cache_dir if hasattr(settings, 'cache_dir') else ".tfa_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        failure_store = FailureEmbeddingStore(db_path=cache_dir / "failure_embeddings.db")
+        log_step("Few-shot learning enabled", db=str(cache_dir / "failure_embeddings.db"))
+    except Exception as e:
+        log_debug(f"Few-shot learning unavailable: {e}")
+
+    async def run_investigations() -> None:
+        rp_repo = RPRepository(
+            url=settings.get_rp_url(),
+            project=settings.get_rp_project(),
+            username=settings.get_rp_username(),
+            password=settings.get_rp_password(),
+            verify_ssl=settings.reportportal.verify_ssl,
+        )
+
+        use_case = InvestigateRCAUseCase(
+            failure_repo=rp_repo,
+            llm_provider=llm_provider,
+            history_repo=rp_repo,
+            verification_service=verification_service,
+            code_fetcher=code_fetcher,
+            must_gather_analyzer=mg_analyzer,
+            failure_store=failure_store,
+        )
+
+        use_case_request = UseCaseRequest(
+            launch_id=launch_id,
+            component=component,
+            push_to_rp=post_to_rp,
+            verify_mode=verify_mode,
+        )
+
+        log_step("Connecting to ReportPortal")
+        console.print(f"Fetching {component} failures from launch {launch_id}...")
+        console.print(f"Using LLM: {provider} (Thinker-Critic pattern)")
+
+        try:
+            async with rp_repo:
+                with console.status("[bold cyan]Investigating failures...[/bold cyan]"):
+                    results = await use_case.execute(use_case_request)
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            return
+
+        if not results:
+            console.print("[yellow]No failures found[/yellow]")
+            return
+
+        console.print(f"Investigated {len(results)} failure(s)")
+
+        finish_metrics()
+
+        if json_output:
+            output = {
+                "results": [r.to_dict() for r in results],
+                "metrics": metrics.to_dict(),
+            }
+            console.print_json(data=output)
+        else:
+            _print_rca_results(results, launch_id, component)
+            console.print()
+            console.print(Panel(metrics.summary(), title="📊 Metrics", border_style="dim"))
+
+        if post_to_rp:
+            console.print(f"[green]✓[/green] Results posted to ReportPortal")
+
+        if notifiers and results:
+            log_step("Sending notifications")
+            notif_summary = AnalysisSummary.from_results(
+                launch_name=launch_id,
+                launch_id=launch_id,
+                component=component,
+                results=[r.to_dict() for r in results],
+                rp_url=settings.get_rp_url(),
+            )
+            for notifier in notifiers:
+                try:
+                    await notifier.send_summary(notif_summary)
+                    console.print(f"[green]✓[/green] Sent notification to {notifier.channel_name}")
+                except Exception as e:
+                    console.print(f"[yellow]Warning:[/yellow] Failed to send {notifier.channel_name} notification: {e}")
+
+    asyncio.run(run_investigations())
+
+
+# =============================================================================
+# INVESTIGATE (alias for analyze --deep, kept for backward compatibility)
 # =============================================================================
 
 
@@ -625,7 +825,7 @@ def parse_logs(
 def investigate(
     launch_id: Annotated[
         str,
-        typer.Option("--launch-id", "-l", help="ReportPortal launch ID or full URL (e.g., https://rp.example.com/ui/#project/launches/all/9657)"),
+        typer.Option("--launch-id", "-l", help="ReportPortal launch ID or full URL"),
     ],
     component: Annotated[
         str,
@@ -659,353 +859,46 @@ def investigate(
         str,
         typer.Option("--provider", help="LLM provider: claude-cli, anthropic, groq, ollama"),
     ] = "claude-cli",
+    must_gather_path: Annotated[
+        str | None,
+        typer.Option("--must-gather-path", help="Path to must-gather artifacts directory"),
+    ] = None,
 ) -> None:
-    """Investigate failures using Thinker-Critic RCA pattern.
-    
-    Uses LLM-based reasoning with 3 steps:
-    1. THINKER: Proposes initial root cause analysis
-    2. CRITIC: Challenges and questions the analysis
-    3. REFINER: Produces final RCA considering critique
-    
-    Verification options:
-    --verify: Actually run the test using 'uv run pytest' to check if it passes
-    --analyze-history: Analyze ReportPortal history pattern + test code for flakiness
-    
-    Examples:
-        # Using launch ID
-        python main.py investigate -l 9657 -c Model_server --push
-        
-        # Using full ReportPortal URL (launch ID is auto-extracted)
-        python main.py investigate -l "https://rp.example.com/ui/#project/launches/all/9657" -c Model_server
-    
-    Use -v/--verbose for detailed debugging output.
+    """Alias for 'analyze --deep'. Kept for backward compatibility.
+
+    See 'analyze --help' for full documentation.
     """
-    # Parse URL to extract launch ID if full URL provided
     from src.utils.url_parser import extract_launch_id
     original_input = launch_id
     launch_id = extract_launch_id(launch_id)
     if original_input != launch_id:
         console.print(f"[dim]Extracted launch ID [cyan]{launch_id}[/cyan] from URL[/dim]")
-    
+
     if not _verbose:
         setup_logging(level="WARNING", log_format="console")
-    
+
+    console.print("[dim]Tip: you can also use 'analyze --deep' instead of 'investigate'[/dim]")
+
     log_step("Loading configuration")
     try:
         settings = create_settings(config)
         if project:
             settings.rp_project = project
-        log_debug("Configuration loaded", 
-                  rp_url=settings.get_rp_url()[:50] + "...",
-                  project=settings.get_rp_project())
     except Exception as e:
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
-    
-    from src.rp import ReportPortalClient, DEFECT_MAP
-    from src.rp import fetch_component_logs
-    from src.rp import TestHistoryFetcher
-    from src.investigator import RCAInvestigator, RCA, get_error_signature
-    from src.utils.ui import CLASSIFICATION_ICONS, SEVERITY_ICONS
-    from src.utils.metrics import start_metrics, finish_metrics
-    from src.domain.services.verification_service import VerificationService, VerifyMode
-    from src.domain.interfaces.code_fetcher import CodeFetcher
-    from src.domain.interfaces.notifier import AnalysisSummary
-    from src.domain.services.parallel_prep_service import ParallelPrepService
-    
-    # Determine verification mode
-    if verify:
-        verify_mode = VerifyMode.RUN_TEST
-    elif analyze_history:
-        verify_mode = VerifyMode.ANALYZE_HISTORY
-    else:
-        verify_mode = VerifyMode.NONE
-    
-    log_step("Initializing LLM provider", provider=provider)
-    llm_provider = _get_llm_provider(provider, settings)
-    if not llm_provider:
-        console.print(f"[yellow]Warning:[/yellow] LLM ({provider}) not available, using pattern-only mode")
-    else:
-        log_debug("LLM provider initialized", model=getattr(llm_provider, 'model_name', 'unknown'))
-    
-    investigator = RCAInvestigator(llm_provider)
-    
-    # Create verification service if needed
-    verification_service = None
-    if verify_mode != VerifyMode.NONE:
-        test_repo_path = None
-        if settings.test_repo.enabled and settings.test_repo.local_path:
-            test_repo_path = settings.test_repo.local_path
-        
-        verification_service = VerificationService(
-            test_repo_path=test_repo_path,
-            timeout=settings.verification.timeout_per_test,
-        )
-        log_step(f"Verification mode: {verify_mode.value}",
-                 repo=test_repo_path if test_repo_path else "not configured")
-    
-    # Create code fetcher for test source analysis
-    code_fetcher: CodeFetcher | None = None
-    if settings.is_code_fetcher_enabled():
-        from pathlib import Path
-        if settings.test_repo.local_path:
-            from src.infrastructure.code_fetcher.local_adapter import LocalCodeFetcher
-            code_fetcher = LocalCodeFetcher(
-                base_path=Path(settings.test_repo.local_path),
-                github_repo=settings.test_repo.repo,
-                github_branch=settings.test_repo.branch,
-            )
-            log_step("Code fetcher: local", path=settings.test_repo.local_path)
-        elif settings.test_repo.repo:
-            from src.infrastructure.code_fetcher.github_adapter import GitHubCodeFetcher
-            code_fetcher = GitHubCodeFetcher(
-                repo=settings.test_repo.repo,
-                branch=settings.test_repo.branch,
-                token=settings.get_github_token(),
-                test_dir=settings.test_repo.test_dir,
-                cache_dir=Path(settings.test_repo.cache_dir),
-            )
-            log_step("Code fetcher: GitHub", repo=settings.test_repo.repo)
-    
-    # Create notifiers for team alerts
-    notifiers = []
-    if settings.is_notifications_enabled():
-        if settings.get_slack_webhook():
-            from src.infrastructure.notifications.slack_notifier import SlackNotifier
-            notifiers.append(SlackNotifier(settings.get_slack_webhook()))
-            log_step("Notifications: Slack enabled")
-        if settings.get_teams_webhook():
-            from src.infrastructure.notifications.teams_notifier import TeamsNotifier
-            notifiers.append(TeamsNotifier(settings.get_teams_webhook()))
-            log_step("Notifications: Teams enabled")
-    
-    # Start metrics tracking
-    metrics = start_metrics(model=getattr(llm_provider, 'model_name', 'unknown'), provider=provider)
-    
-    async def run_investigations() -> None:
-        rp_client = ReportPortalClient(
-            url=settings.get_rp_url(),
-            project=settings.get_rp_project(),
-            username=settings.get_rp_username(),
-            password=settings.get_rp_password(),
-            verify_ssl=settings.reportportal.verify_ssl,
-        )
-        
-        async with rp_client:
-            log_step("Connecting to ReportPortal")
-            console.print(f"Fetching {component} failures from launch {launch_id}...")
-            
-            log_step("Fetching component logs", launch_id=launch_id, component=component)
-            launch_result = await fetch_component_logs(
-                url=settings.get_rp_url(),
-                project=settings.get_rp_project(),
-                username=settings.get_rp_username(),
-                password=settings.get_rp_password(),
-                launch_id=launch_id,
-                component_name=component,
-                verify_ssl=settings.reportportal.verify_ssl,
-            )
-            log_debug("Launch fetched", launch_name=launch_result.launch_name, 
-                      components=len(launch_result.components))
-            
-            target_component = launch_result.get_component(component)
-            if not target_component or not target_component.failures:
-                console.print("[yellow]No failures found[/yellow]")
-                return
-            
-            failures = target_component.failures
-            console.print(f"Found {len(failures)} failure(s)")
-            console.print(f"Using LLM: {provider} (Thinker-Critic pattern)")
-            
-            log_debug("Failures to analyze", count=len(failures))
-            
-            # Track metrics
-            metrics.failures_analyzed = len(failures)
-            
-            results: list[tuple[str, str, RCA]] = []
-            verified_signatures: dict[str, str] = {}
-            
-            # Group failures by error signature for efficiency
-            signature_groups: dict[str, list] = {}
-            for failure in failures:
-                sig = get_error_signature(failure.combined_logs)
-                if sig not in signature_groups:
-                    signature_groups[sig] = []
-                signature_groups[sig].append(failure)
-            
-            metrics.unique_signatures = len(signature_groups)
-            console.print(f"[dim]Grouped into {len(signature_groups)} unique error signature(s)[/dim]")
-            
-            # ============================================================
-            # PHASE 1: Parallel Data Preparation (I/O operations)
-            # ============================================================
-            console.print("[dim]Phase 1: Preparing data in parallel...[/dim]")
-            
-            # Create history fetcher for verification
-            history_fetcher_instance = None
-            if verify_mode in (VerifyMode.ANALYZE_HISTORY, VerifyMode.ALL):
-                history_fetcher_instance = TestHistoryFetcher(rp_client, max_launches=14)
-            
-            # Create parallel prep service
-            parallel_prep = ParallelPrepService(
-                code_fetcher=code_fetcher,
-                verification_service=verification_service,
-                history_fetcher=history_fetcher_instance,
-                max_concurrent_io=10,
-            )
-            
-            # Prepare all data in parallel
-            prepared_data, prep_stats = await parallel_prep.prepare_all(
-                signature_groups=signature_groups,
-                verify_mode=verify_mode,
-                fallback_code_getter=lambda name: _get_test_code(name, settings),
-            )
-            
-            console.print(f"[dim]  ✓ Code fetched: {prep_stats.code_fetched} | "
-                         f"Verifications: {prep_stats.verifications_run} | "
-                         f"Time: {prep_stats.prep_time_ms}ms[/dim]")
-            
-            # ============================================================
-            # PHASE 2: Sequential LLM Processing (with pre-fetched data)
-            # ============================================================
-            console.print("[dim]Phase 2: Running LLM analysis (sequential)...[/dim]")
-            
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Investigating...", total=len(failures))
-                
-                for data in prepared_data:
-                    test_name = data.test_name
-                    test_id = data.test_id
-                    logs = data.logs
-                    sig = data.signature
-                    
-                    log_step(f"Investigating: {test_name[:50]}...")
-                    log_debug("Test details", test_id=test_id, signature=sig[:12], 
-                              log_length=len(logs), group_size=data.group_size)
-                    
-                    # Use pre-fetched data
-                    test_code = data.test_code
-                    test_code_info = data.test_code_info
-                    verification_result = data.verification_result
-                    verification_output = data.verification_output
-                    
-                    if test_code_info:
-                        log_debug("Using pre-fetched code",
-                                 file=test_code_info.file_path,
-                                 github_url=bool(test_code_info.github_url))
-                    
-                    # Display verification result if run
-                    if verification_result != "not_run":
-                        metrics.record_verification(verification_result)
-                        if verification_result == "passed":
-                            console.print(f"    [green]✓ PASSED on re-run - Intermittent Failure[/green]")
-                        elif verification_result == "flaky":
-                            reason = data.verification_details.get("reason", "")[:60]
-                            console.print(f"    [yellow]⚡ FLAKY - {reason}[/yellow]")
-                        elif verification_result == "consistent_fail":
-                            consecutive = data.verification_details.get("details", {}).get("history", {}).get("consecutive_failures", "?")
-                            console.print(f"    [red]✗ Consistent failure ({consecutive} consecutive)[/red]")
-                        elif verification_result == "failed":
-                            console.print(f"    [red]✗ FAILED on re-run - Consistent bug[/red]")
-                        else:
-                            reason = data.verification_details.get("reason", "")[:50]
-                            console.print(f"    [dim]? {verification_result}: {reason}[/dim]")
-                    
-                    # Progress callback
-                    def on_progress(step: str, detail: str = ""):
-                        step_icons = {"gathering": "📋", "thinking": "🤔", "critiquing": "🔍", "refining": "✨"}
-                        icon = step_icons.get(step, "⚙️")
-                        progress.update(task, description=f"{icon} {step.title()}...")
-                        log_step(f"LLM step: {step}", detail=detail if detail else None)
-                    
-                    investigator.progress_callback = on_progress
-                    
-                    # Sequential LLM call (only one active at a time)
-                    log_step("Calling LLM for analysis")
-                    rca = await investigator.investigate(
-                        test_name=test_name,
-                        logs=logs,
-                        test_code=test_code,
-                        verification_result=verification_result,
-                        verification_output=verification_output,
-                    )
-                    
-                    log_debug("RCA result", 
-                              classification=rca.classification,
-                              confidence=f"{rca.confidence:.0%}",
-                              severity=rca.severity)
-                    
-                    # Enhance RCA with code info if available
-                    if test_code_info:
-                        rca.github_url = test_code_info.github_url
-                        rca.test_file = test_code_info.file_path
-                        rca.fixtures = test_code_info.fixtures
-                        if test_code_info.is_potentially_flaky:
-                            rca.code_analysis = f"Code shows flakiness indicators: " + ", ".join([
-                                f"uses_sleep={test_code_info.uses_sleep}",
-                                f"has_timeout={test_code_info.has_timeout}",
-                                f"wait_patterns={test_code_info.wait_patterns[:2] if test_code_info.wait_patterns else []}",
-                            ])
-                    
-                    # Track LLM call
-                    metrics.llm_calls += 1
-                    
-                    results.append((test_name, test_id, rca))
-                    progress.update(task, advance=1)
-                    
-                    # Reuse RCA for similar failures in the same group
-                    # Find the original group to get other failures
-                    original_group = signature_groups.get(sig, [])
-                    for other in original_group[1:]:
-                        other_name = other.test_item.name or "unknown"
-                        other_id = str(other.test_item.id)
-                        results.append((other_name, other_id, rca))
-                        progress.update(task, advance=1)
-                        metrics.rca_reused += 1
-                        console.print(f"  [dim]↳ Reusing RCA for {other_name[:40]}... (same error)[/dim]")
-            
-            # Finish metrics
-            finish_metrics()
-            
-            if json_output:
-                output = {
-                    "results": [{"test_name": n, "test_id": i, **r.to_dict()} for n, i, r in results],
-                    "metrics": metrics.to_dict(),
-                }
-                console.print_json(data=output)
-            else:
-                _print_rca_results(results, launch_result.launch_name, component)
-                # Print metrics summary
-                console.print()
-                console.print(Panel(metrics.summary(), title="📊 Metrics", border_style="dim"))
-            
-            if post_to_rp:
-                await _post_rca_results(rp_client, results)
-            
-            # Send notifications if configured
-            if notifiers and results:
-                log_step("Sending notifications")
-                summary = AnalysisSummary.from_results(
-                    launch_name=launch_result.launch_name,
-                    launch_id=launch_id,
-                    component=component,
-                    results=[r.to_dict() for _, _, r in results],
-                    rp_url=settings.get_rp_url(),
-                )
-                for notifier in notifiers:
-                    try:
-                        await notifier.send_summary(summary)
-                        console.print(f"[green]✓[/green] Sent notification to {notifier.channel_name}")
-                    except Exception as e:
-                        console.print(f"[yellow]Warning:[/yellow] Failed to send {notifier.channel_name} notification: {e}")
-    
-    asyncio.run(run_investigations())
+
+    _run_deep_analysis(
+        launch_id=launch_id,
+        component=component,
+        settings=settings,
+        provider=provider,
+        post_to_rp=post_to_rp,
+        json_output=json_output,
+        verify=verify,
+        analyze_history=analyze_history,
+        must_gather_path=must_gather_path,
+    )
 
 
 def _get_llm_provider(provider: str, settings):
@@ -1031,83 +924,9 @@ def _get_llm_provider(provider: str, settings):
     return None
 
 
-def _get_test_code(test_name: str, settings) -> str:
-    """Get test source code if available."""
-    if not settings.test_repo.enabled or not settings.test_repo.local_path:
-        return ""
-    
-    from pathlib import Path
-    repo = Path(settings.test_repo.local_path)
-    if not repo.exists():
-        return ""
-    
-    func_name = test_name.split("::")[-1].split("[")[0] if "::" in test_name else test_name.split("[")[0]
-    
-    for py_file in repo.rglob("test_*.py"):
-        try:
-            content = py_file.read_text()
-            if f"def {func_name}" in content or f"def test_{func_name}" in content:
-                return content[:3000]
-        except Exception:
-            continue
-    return ""
 
-
-async def _run_verification(test_name: str, settings, confidence: float = 0.0) -> tuple[str, str]:
-    """Run test for verification.
-    
-    Args:
-        test_name: Name of test to run
-        settings: Application settings
-        confidence: Current confidence score (skip if high)
-        
-    Returns:
-        Tuple of (result, output)
-    """
-    if not settings.test_repo.enabled or not settings.test_repo.local_path:
-        return "not_run", ""
-    
-    # Skip verification if confidence is high enough
-    if settings.verification.skip_on_low_confidence:
-        if confidence >= settings.verification.confidence_threshold:
-            console.print(f"  ⏭ Skipping verification (confidence {confidence:.0%} >= {settings.verification.confidence_threshold:.0%})")
-            return "skipped_high_confidence", ""
-    
-    import subprocess
-    from pathlib import Path
-    
-    repo = Path(settings.test_repo.local_path)
-    func_name = test_name.split("::")[-1].split("[")[0] if "::" in test_name else test_name.split("[")[0]
-    
-    timeout = settings.verification.timeout_per_test
-    console.print(f"  ▶ Re-running: {func_name[:50]}... (timeout: {timeout}s)")
-    
-    try:
-        result = subprocess.run(
-            ["uv", "run", "pytest", "-k", func_name, "-v", "--tb=short", "-x"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**os.environ},
-        )
-        
-        if result.returncode == 0:
-            console.print(f"    ✓ PASSED - marking as Intermittent Failure")
-            return "passed", result.stdout
-        else:
-            console.print(f"    ✗ FAILED (exit {result.returncode})")
-            return "failed", result.stdout + result.stderr
-    except subprocess.TimeoutExpired:
-        console.print(f"    ⏱ TIMEOUT after {timeout}s")
-        return "timeout", f"Test execution timed out after {timeout}s"
-    except Exception as e:
-        console.print(f"    ⚠ ERROR: {e}")
-        return "error", str(e)
-
-
-def _print_rca_results(results: list[tuple[str, str, "RCA"]], launch_name: str, component: str) -> None:
-    """Print RCA results to console."""
+def _print_rca_results(results: list, launch_name: str, component: str) -> None:
+    """Print investigation results to console."""
     from src.utils.ui import CLASSIFICATION_ICONS, SEVERITY_ICONS
     
     console.print()
@@ -1119,20 +938,53 @@ def _print_rca_results(results: list[tuple[str, str, "RCA"]], launch_name: str, 
         border_style="cyan",
     ))
     
-    for test_name, test_id, rca in results:
-        icon = CLASSIFICATION_ICONS.get(rca.classification, "❓")
-        sev_icon = SEVERITY_ICONS.get(rca.severity, "⚪")
+    for resp in results:
+        rca = resp.rca
+        category = rca.category.value
+        severity = rca.severity.value
+        icon = CLASSIFICATION_ICONS.get(category, "❓")
+        sev_icon = SEVERITY_ICONS.get(severity, "⚪")
         
         console.print()
-        console.print(f"[bold]{icon} {test_name[:60]}[/bold]")
-        console.print(f"   Classification: {rca.classification}")
-        console.print(f"   Severity: {sev_icon} {rca.severity} | Confidence: {rca.confidence * 100:.0f}%")
+        console.print(f"[bold]{icon} {resp.test_name[:60]}[/bold]")
+        console.print(f"   Classification: {category}")
+        console.print(f"   Severity: {sev_icon} {severity} | Confidence: {rca.confidence * 100:.0f}%")
+        if resp.calibrated_confidence is not None:
+            console.print(f"   Calibrated: {resp.calibrated_confidence * 100:.0f}% ({resp.confidence_explanation or ''})")
         console.print(f"   Root Cause: [dim]{rca.root_cause[:100]}[/dim]")
         console.print(f"   [dim]{rca.reasoning[:150]}[/dim]")
+        
+        if resp.timeout_analysis:
+            verdict = resp.timeout_analysis.get("verdict", "")
+            if verdict:
+                console.print(f"   Timeout: [dim]{verdict}[/dim]")
+        
+        if resp.cluster_info:
+            cause = resp.cluster_info.get("likely_root_cause", "")
+            affected = resp.cluster_info.get("affected_tests", 0)
+            if cause:
+                console.print(f"   Cluster: [dim]{cause} ({affected} tests affected)[/dim]")
+        
+        if resp.verification_result and resp.verification_result != "not_run":
+            v_dict = resp.verification_details or {}
+            v_reason = v_dict.get("reason", "")
+            v_inner = v_dict.get("details", {})
+            v_exit = v_inner.get("exit_code", "")
+            v_line = f"   Verification: {resp.verification_result}"
+            if v_exit != "":
+                v_line += f" (exit={v_exit})"
+            if v_reason:
+                v_line += f" — {v_reason[:120]}"
+            console.print(v_line)
+            v_output = v_dict.get("output", "")
+            if v_output and resp.verification_result in ("failed", "error"):
+                last_lines = "\n".join(v_output.strip().splitlines()[-5:])
+                console.print(f"   [dim]{last_lines}[/dim]")
     
     summary: dict[str, int] = {}
-    for _, _, rca in results:
-        summary[rca.classification] = summary.get(rca.classification, 0) + 1
+    for resp in results:
+        cat = resp.rca.category.value
+        summary[cat] = summary.get(cat, 0) + 1
     
     console.print()
     table = Table(title="Summary")
@@ -1142,25 +994,6 @@ def _print_rca_results(results: list[tuple[str, str, "RCA"]], launch_name: str, 
         icon = CLASSIFICATION_ICONS.get(c, "❓")
         table.add_row(f"{icon} {c}", str(count))
     console.print(table)
-
-
-async def _post_rca_results(rp_client, results: list[tuple[str, str, "RCA"]]) -> None:
-    """Post RCA results to ReportPortal."""
-    from src.rp import DEFECT_MAP
-    
-    posted = 0
-    for test_name, test_id, rca in results:
-        defect_type = DEFECT_MAP.get(rca.classification)
-        rp_comment = rca.to_rp_comment()
-        
-        if test_id and defect_type:
-            try:
-                await rp_client.update_defect_type(test_id, defect_type, rp_comment)
-                posted += 1
-            except Exception as e:
-                console.print(f"[yellow]Warning:[/yellow] Failed to post for {test_id}: {e}")
-    
-    console.print(f"[green]✓[/green] Posted {posted} RCA results to RP")
 
 
 # =============================================================================
@@ -1523,6 +1356,10 @@ def analyze(
         str,
         typer.Option("--component", "-c", help="Component to analyze"),
     ],
+    deep: Annotated[
+        bool,
+        typer.Option("--deep", "-d", help="Deep LLM analysis with Thinker-Critic pattern, clustering, and calibration"),
+    ] = False,
     server: Annotated[
         str | None,
         typer.Option("--server", "-s", help="TFA server URL (e.g., http://tfa.internal:8000)"),
@@ -1557,26 +1394,48 @@ def analyze(
     ] = False,
     no_llm: Annotated[
         bool,
-        typer.Option("--no-llm", help="Use only rule-based classification"),
+        typer.Option("--no-llm", help="Use only rule-based classification (fast path only)"),
     ] = False,
+    verify: Annotated[
+        bool,
+        typer.Option("--verify", help="Re-run tests using uv run pytest to verify (requires --deep)"),
+    ] = False,
+    analyze_history: Annotated[
+        bool,
+        typer.Option("--analyze-history", help="Analyze RP history for flakiness patterns (requires --deep)"),
+    ] = False,
+    must_gather_path: Annotated[
+        str | None,
+        typer.Option("--must-gather-path", help="Path to pre-collected must-gather artifacts (requires --deep)"),
+    ] = None,
 ) -> None:
     """Analyze test failures using AI classification.
     
-    Can run locally or connect to centralized TFA server (--server).
+    Two modes:
+    
+    Fast (default): Rule-based pattern matching -- instant, no LLM cost.
+    
+    Deep (--deep): Full LLM Thinker-Critic analysis with failure clustering,
+    timeout analysis, confidence calibration, and optional verification.
     
     Examples:
-        # Using launch ID
+        # Fast classification
         python main.py analyze -l 9657 -c Model_server --push
         
-        # Using full ReportPortal URL
-        python main.py analyze -l "https://rp.example.com/ui/#project/launches/all/9657" -c Model_server --push
+        # Deep LLM investigation
+        python main.py analyze -l 9657 -c Model_server --deep --push
         
-        # Server mode (shared cache across 30 users)
+        # Deep + verify + history analysis
+        python main.py analyze -l 9657 -c Model_server --deep --verify --analyze-history
+        
+        # Deep + must-gather cluster diagnostics
+        python main.py analyze -l 9657 -c Model_server --deep --must-gather-path /path/to/artifacts
+        
+        # Server mode (shared cache)
         python main.py analyze -l 9657 -c Model_server --server http://tfa:8000 --push
         
     Use -v/--verbose for detailed debugging output.
     """
-    # Parse URL to extract launch ID if full URL provided
     from src.utils.url_parser import extract_launch_id, is_rp_url
     original_input = launch_id
     launch_id = extract_launch_id(launch_id)
@@ -1585,6 +1444,11 @@ def analyze(
     
     if not _verbose:
         setup_logging(level="WARNING", log_format="console")
+    
+    # Auto-enable --deep when deep-only flags are used
+    if (verify or analyze_history or must_gather_path) and not deep:
+        deep = True
+        console.print("[dim]Auto-enabled --deep mode (required by --verify/--analyze-history/--must-gather-path)[/dim]")
     
     # Server mode: Use centralized API
     if server:
@@ -1601,7 +1465,6 @@ def analyze(
         ))
         return
     
-    # Local mode: Direct analysis
     log_step("Loading configuration")
     try:
         settings = create_settings(config)
@@ -1612,16 +1475,30 @@ def analyze(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
     
-    from src.rp import fetch_component_logs
+    # Deep mode: full LLM Thinker-Critic pipeline
+    if deep:
+        _run_deep_analysis(
+            launch_id=launch_id,
+            component=component,
+            settings=settings,
+            provider=provider,
+            post_to_rp=push_to_rp and not dry_run,
+            json_output=json_output,
+            verify=verify,
+            analyze_history=analyze_history,
+            must_gather_path=must_gather_path,
+        )
+        return
+    
+    # Fast mode: rule-based pattern matching
+    from src.infrastructure.reportportal import fetch_component_logs
     from src.domain.services.classification_service import ClassificationService
-    from src.domain.services.investigation_service import InvestigationService
-    from src.infrastructure.llm.llm_factory import LLMFactory
     
     log_step("Initializing classifier")
     classifier = ClassificationService()
     
     async def run_analysis() -> None:
-        from src.rp import ReportPortalClient, DEFECT_MAP
+        from src.infrastructure.reportportal import ReportPortalClient
         
         rp_client = ReportPortalClient(
             url=settings.get_rp_url(),
@@ -1636,15 +1513,19 @@ def analyze(
             console.print(f"Fetching {component} failures from launch {launch_id}...")
             
             log_step("Fetching component logs", launch_id=launch_id, component=component)
-            result = await fetch_component_logs(
-                url=settings.get_rp_url(),
-                project=settings.get_rp_project(),
-                username=settings.get_rp_username(),
-                password=settings.get_rp_password(),
-                launch_id=launch_id,
-                component_name=component,
-                verify_ssl=settings.reportportal.verify_ssl,
-            )
+            try:
+                result = await fetch_component_logs(
+                    url=settings.get_rp_url(),
+                    project=settings.get_rp_project(),
+                    username=settings.get_rp_username(),
+                    password=settings.get_rp_password(),
+                    launch_id=launch_id,
+                    component_name=component,
+                    verify_ssl=settings.reportportal.verify_ssl,
+                )
+            except ValueError as e:
+                console.print(f"[red]Error:[/red] {e}")
+                raise typer.Exit(1) from e
             log_debug("Launch fetched", launch_name=result.launch_name)
             
             target = result.get_component(component)
@@ -1652,20 +1533,16 @@ def analyze(
                 console.print("[yellow]No failures found[/yellow]")
                 return
             
-            console.print(f"Found {len(target.failures)} failure(s)")
-            log_debug("Starting analysis", failures=len(target.failures))
+            total = len(target.failures)
+            console.print(f"Found {total} failure(s)")
+            log_debug("Starting analysis", failures=total)
             
             results = []
+            rp_updates = []
             for i, failure in enumerate(target.failures, 1):
-                log_step(f"Analyzing [{i}/{len(target.failures)}]: {failure.test_item.name[:40]}...")
+                log_step(f"Analyzing [{i}/{total}]: {failure.test_item.name[:40]}...")
                 
-                log_debug("Extracting evidence from logs", log_length=len(failure.combined_logs))
                 evidence = classifier.get_evidence_from_logs(failure.combined_logs)
-                log_debug("Evidence extracted", 
-                          errors=evidence.error_count if hasattr(evidence, 'error_count') else 'N/A',
-                          has_timeout=getattr(evidence, 'has_timeout', False))
-                
-                log_debug("Classifying failure")
                 classification = classifier.classify(failure.combined_logs, evidence)
                 log_debug("Classification result",
                           category=classification.category.value,
@@ -1683,9 +1560,13 @@ def analyze(
                 if push_to_rp and not dry_run:
                     defect_type = classification.category.defect_type_code
                     comment = f"🤖 AI: {classification.category.value} ({classification.confidence_percent}%)\n{classification.reasoning}"
-                    await rp_client.update_defect_type(
-                        str(failure.test_item.id), defect_type, comment
+                    rp_updates.append(
+                        rp_client.update_defect_type(str(failure.test_item.id), defect_type, comment)
                     )
+            
+            if rp_updates:
+                log_step(f"Pushing {len(rp_updates)} results to ReportPortal in parallel...")
+                await asyncio.gather(*rp_updates)
             
             if json_output:
                 console.print_json(data=results)

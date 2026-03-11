@@ -205,6 +205,11 @@ class FailureClusterAnalyzer:
             r"unauthorized.*registry",
             r"repository.*not.*found",
         ],
+        "setup_timeout": [
+            r"failed on setup.*TimeoutExpiredError",
+            r"failed on setup.*Timed Out",
+            r"wait_for_condition.*Timed Out",
+        ],
     }
     
     def analyze_failures(
@@ -294,6 +299,7 @@ class FailureClusterAnalyzer:
             "network": "Network connectivity issue (DNS/routing/firewall)",
             "operator": "Operator not healthy or degraded",
             "registry": "Container registry access issue",
+            "setup_timeout": "Setup-phase timeout — platform resource(s) not becoming ready",
         }
         return causes.get(pattern_type, "Unknown systemic issue")
     
@@ -304,6 +310,7 @@ class FailureClusterAnalyzer:
             "network": "infrastructure",
             "operator": "operator",
             "registry": "infrastructure",
+            "setup_timeout": "infrastructure",
         }
         return categories.get(pattern_type, "unknown")
     
@@ -314,57 +321,9 @@ class FailureClusterAnalyzer:
             "network": "Check DNS resolution, verify network policies, ensure external services are accessible.",
             "operator": "Check operator pod status and logs. May need to restart operator or check CRDs.",
             "registry": "Verify registry credentials, check image exists, ensure pull secrets are configured.",
+            "setup_timeout": "Check must-gather for unhealthy pods, operator status, and resource failures. Verify cluster connectivity and resource availability.",
         }
         return recommendations.get(pattern_type, "Investigate shared failure patterns.")
-
-
-# =============================================================================
-# Enhanced Evidence Extraction
-# =============================================================================
-
-@dataclass
-class EnhancedEvidence:
-    """Enhanced evidence with additional context."""
-    # Basic evidence
-    error_message: str
-    error_type: str
-    stack_trace: str
-    
-    # Enhanced context
-    pre_error_logs: str  # WARNING/INFO before ERROR
-    related_failures: list[str]  # Other failures in same launch
-    timeout_analysis: TimeoutAnalysis | None
-    cluster_info: FailureCluster | None
-    
-    # Inferred context
-    operation_type: str
-    expected_duration: str
-    component_notes: list[str]
-    
-    def to_prompt_context(self) -> str:
-        """Generate enhanced context for LLM prompt."""
-        parts = []
-        
-        parts.append(f"ERROR: {self.error_type}: {self.error_message}")
-        parts.append(f"STACK TRACE:\n{self.stack_trace[:800]}")
-        
-        if self.pre_error_logs:
-            parts.append(f"CONTEXT (logs before error):\n{self.pre_error_logs[:500]}")
-        
-        if self.timeout_analysis:
-            parts.append(f"TIMEOUT ANALYSIS: {self.timeout_analysis.recommendation}")
-        
-        if self.cluster_info:
-            parts.append(f"SYSTEMIC ISSUE DETECTED: {self.cluster_info.likely_root_cause}")
-            parts.append(f"Affects {len(self.cluster_info.failures)} tests")
-        
-        if self.related_failures:
-            parts.append(f"RELATED FAILURES IN LAUNCH: {len(self.related_failures)} other tests failed")
-        
-        if self.component_notes:
-            parts.append(f"COMPONENT CONTEXT:\n" + "\n".join(f"- {n}" for n in self.component_notes))
-        
-        return "\n\n".join(parts)
 
 
 def extract_pre_error_logs(full_logs: str, max_lines: int = 20) -> str:
@@ -396,10 +355,6 @@ def extract_pre_error_logs(full_logs: str, max_lines: int = 20) -> str:
     
     return '\n'.join(relevant[-max_lines:])
 
-
-# =============================================================================
-# Confidence Calibration
-# =============================================================================
 
 @dataclass
 class CalibratedConfidence:
@@ -460,6 +415,15 @@ def calibrate_confidence(
     elif verification_result == "contradicted":
         calibrated *= 0.60
         factors["verification_contradicted"] = 0.60
+    elif verification_result == "weak_confirm":
+        calibrated *= 1.08
+        factors["verification_weak_confirm"] = 1.08
+    elif verification_result == "strong_contradict":
+        calibrated *= 0.50
+        factors["verification_strong_contradict"] = 0.50
+    elif verification_result == "inconclusive":
+        calibrated *= 0.90
+        factors["verification_inconclusive"] = 0.90
     
     # Clamp to valid range
     calibrated = max(0.10, min(0.99, calibrated))

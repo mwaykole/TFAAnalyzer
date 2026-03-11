@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+uv sync                # or: pip install -r requirements.txt
 
 export RP_URL="https://reportportal.example.com"
 export RP_USERNAME="your-username"
@@ -21,18 +21,28 @@ python main.py list-launches -n 5
 
 | Command | Description |
 |---------|-------------|
-| `analyze` | Analyze failures in a launch |
-| `investigate` | Deep RCA with Thinker-Critic |
+| `analyze` | Analyze failures (fast or deep) |
+| `investigate` | Alias for `analyze --deep` |
 
 ```bash
-# Dry run
-python main.py analyze -l 9657 -c ModelServer --dry-run
+# Fast classification (rule-based, no LLM)
+python main.py analyze -l 10748 -c "Model Server"
 
-# Push to ReportPortal
-python main.py analyze -l 9657 -c ModelServer --push
+# Deep LLM investigation
+python main.py analyze -l 10748 -c "Model Server" --deep --provider claude-cli
 
-# Deep investigation
-python main.py investigate -l 9657 -c ModelServer --push
+# Deep + verify (re-run tests on cluster)
+python main.py analyze -l 10748 -c "Model Server" --deep --verify --provider claude-cli
+
+# Deep + must-gather cluster diagnostics
+python main.py analyze -l 10748 -c "Model Server" --deep --provider claude-cli \
+  --must-gather-path /path/to/must-gather-collected
+
+# Push results to ReportPortal
+python main.py analyze -l 10748 -c "Model Server" --deep --provider claude-cli --push
+
+# Investigate (same as analyze --deep)
+python main.py investigate -l 10748 -c "Model Server" --verify --provider claude-cli
 ```
 
 ### Server Mode
@@ -42,7 +52,7 @@ python main.py investigate -l 9657 -c ModelServer --push
 python main.py serve --port 8000 --workers 4
 
 # Use server (from any machine)
-python main.py analyze -l 9657 -c ModelServer --server http://tfa:8000 --push
+python main.py analyze -l 10748 -c "Model Server" --server http://tfa:8000 --push
 ```
 
 ### Information
@@ -55,8 +65,8 @@ python main.py analyze -l 9657 -c ModelServer --server http://tfa:8000 --push
 
 ```bash
 python main.py list-launches -n 20
-python main.py component-logs -l 9657 -c ModelServer
-python main.py test-history -l 9657 -c ModelServer
+python main.py component-logs -l 10748 -c "Model Server"
+python main.py test-history -l 10748 -c "Model Server"
 ```
 
 ### Analytics
@@ -66,6 +76,8 @@ python main.py test-history -l 9657 -c ModelServer
 | `stats` | Overall statistics |
 | `dashboard` | Full analytics dashboard |
 | `health` | Component health scores |
+| `digest` | Weekly summary digest |
+| `trends` | Failure trends |
 | `accuracy-report` | Model accuracy metrics |
 
 ```bash
@@ -83,6 +95,7 @@ python main.py accuracy-report
 | `cache-clear` | Clear analysis cache |
 | `learn` | Manage custom patterns |
 | `record-feedback` | Record correction |
+| `parse-logs` | Parse logs standalone |
 
 ---
 
@@ -92,12 +105,17 @@ python main.py accuracy-report
 |------|-------------|---------|
 | `--dry-run` | Preview without posting | False |
 | `--push` | Post results to RP | False |
-| `--json` | Output as JSON | False |
-| `--output FILE` | Save to file | None |
+| `--deep` / `-d` | Enable LLM analysis | False |
+| `--verify` | Re-run tests on cluster | False |
+| `--analyze-history` | RP history flakiness check | False |
+| `--must-gather-path` | Path to must-gather artifacts | None |
+| `--json` / `-j` | Output as JSON | False |
 | `--no-cache` | Disable caching | False |
+| `--no-llm` | Rule-based only (fast path) | False |
 | `--provider NAME` | LLM provider | claude-cli |
-| `--high-accuracy` | High accuracy mode | True |
-| `--cost-optimize` | Use cheaper model | False |
+| `--server URL` | Use centralized TFA server | None |
+| `-p, --project` | RP project name | env var |
+| `--config` | Config file path | config.yaml |
 
 ---
 
@@ -111,11 +129,21 @@ python main.py analyze -l <ID> -c <COMPONENT> --dry-run
 python main.py analyze -l <ID> -c <COMPONENT> --push
 ```
 
+### ODH/RHOAI with --verify
+
+```bash
+# 1. Clone: git clone https://github.com/opendatahub-io/opendatahub-tests
+# 2. config.yaml: test_repo.enabled=true, local_path=/path/to/opendatahub-tests
+# 3. Login: oc login --token=sha256~TOKEN --server=https://api.cluster:6443
+# 4. Export env vars (see .env.ods.example)
+python main.py analyze -l 10748 -c "Model Server" --deep --verify --provider claude-cli
+```
+
 ### Multi-Component
 
 ```bash
-for comp in Model_server Workbenches TrustyAI Pipelines; do
-  python main.py analyze -l 9657 -c $comp --push
+for comp in "Model Server" Workbenches TrustyAI Pipelines; do
+  python main.py analyze -l 10748 -c "$comp" --push
 done
 ```
 
@@ -133,10 +161,10 @@ python main.py dashboard --days 7
 
 | Category | RP Code | When |
 |----------|---------|------|
-| Product Bug | PB (pb001) | Real defect in product |
-| Test Automation Issue | AB (ab001) | Test code problem |
-| Infrastructure Issue | SI (si001) | Cluster/env issue |
-| Flaky Test | AB (ab_1kbn5su3gqpdt) | Intermittent failure |
+| Product Bug | PB (pb001) | Real defect in RHOAI/KServe component |
+| Test Automation Issue | AB (ab001) | Test code problem (short timeout, bad assertion) |
+| Infrastructure Issue | SI (si001) | Cluster/env issue (pod crash, auth, GPU, OOM) |
+| Intermittent Failure | SI | Flaky (passes on retry, inconsistent history) |
 
 ---
 
@@ -156,16 +184,12 @@ python main.py dashboard --days 7
 | Provider | Cost | Speed | Setup |
 |----------|------|-------|-------|
 | Claude CLI | Free | Medium | `which claude` |
-| Groq | Free | Fast | `GROQ_API_KEY` |
 | Anthropic | Paid | Fast | `ANTHROPIC_API_KEY` |
+| Groq | Free | Fast | `GROQ_API_KEY` |
 | Ollama | Free | Slow | Local install |
 
 ```bash
-# Use specific provider
-python main.py analyze -l 9657 -c ModelServer --provider groq
-
-# Cost optimization
-python main.py analyze -l 9657 -c ModelServer --cost-optimize
+python main.py analyze -l 10748 -c "Model Server" --deep --provider groq
 ```
 
 ---
@@ -180,19 +204,9 @@ echo $RP_USERNAME
 python main.py list-launches -n 1
 ```
 
-### Slow Analysis
-
-```bash
---cost-optimize
---provider groq
-python main.py cache-stats
-```
-
 ### Low Accuracy
 
 ```bash
---high-accuracy
---provider anthropic
 python main.py learn --add
 python main.py record-feedback --id <ID> --correct "Product Bug"
 ```
@@ -220,47 +234,45 @@ export REDIS_URL="redis://localhost:6379"
 
 ```yaml
 reportportal:
-  url: https://reportportal.example.com
-  username: your-username
-  password: your-password
-  project: your-project
+  verify_ssl: false
 
 llm:
   provider: anthropic
   model: claude-sonnet-4-20250514
   temperature: 0.1
 
+test_repo:
+  enabled: true
+  local_path: "/path/to/opendatahub-tests"
+
+verification:
+  timeout_per_test: 0
+  collect_must_gather: true
+
+must_gather:
+  enabled: true
+  base_path: "must-gather-collected"
+
 analysis:
   confidence_threshold: 0.7
+
+cache:
+  enabled: true
+  backend: memory
 ```
 
 ---
 
-## Web UI
-
-```bash
-# Terminal 1
-python main.py serve --port 8000
-
-# Terminal 2
-cd ui
-npm install
-npm run dev
-```
-
-Access at http://localhost:3000
-
----
-
-## Files
+## Key Files
 
 | File | Purpose |
 |------|---------|
-| `classification_rules.yaml` | Classification patterns |
-| `knowledge_base.yaml` | Component knowledge |
+| `knowledge_base.yaml` | Domain rules, component context, quick rules |
 | `config.yaml` | Configuration |
-| `tfa_history.db` | SQLite history |
+| `config.example.yaml` | Config template |
+| `.env.example` | General env var template |
+| `.env.ods.example` | ODH/RHOAI env vars for --verify |
 
 ---
 
-**Version**: 2.1 | **Last Updated**: January 2026
+**Version**: 3.0 | **Last Updated**: March 2026

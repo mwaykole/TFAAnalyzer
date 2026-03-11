@@ -112,8 +112,8 @@ class LocalCodeFetcher(CodeFetcher):
             github_url=github_url,
         )
         
-        # Enhance with AST parsing
-        self._enhance_with_parser(test_info, function_code or content)
+        # Enhance with AST parsing (use full file for valid AST)
+        self._enhance_with_parser(test_info, content)
         
         return test_info
     

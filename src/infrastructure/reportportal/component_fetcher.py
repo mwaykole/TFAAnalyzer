@@ -104,11 +104,28 @@ class LaunchResult:
         return [c for c in self.components if c.status == "FAILED"]
     
     def get_component(self, name: str) -> Component | None:
-        """Get a specific component by name (case-insensitive)."""
+        """Get a specific component by name.
+
+        Matching order: exact (case-insensitive) → normalized
+        (underscores/hyphens treated as spaces) → substring containment.
+        """
         name_lower = name.lower()
         for c in self.components:
             if c.name.lower() == name_lower:
                 return c
+
+        def _normalize(s: str) -> str:
+            return s.lower().replace("_", " ").replace("-", " ").strip()
+
+        name_norm = _normalize(name)
+        for c in self.components:
+            if _normalize(c.name) == name_norm:
+                return c
+
+        for c in self.components:
+            if name_norm in _normalize(c.name) or _normalize(c.name) in name_norm:
+                return c
+
         return None
     
     def to_dict(self) -> dict[str, Any]:
@@ -195,14 +212,7 @@ class ComponentFetcher:
         launch_result = await self.get_launch_components(launch_id)
         
         component = launch_result.get_component(component_name)
-        if not component:
-            available = ", ".join(launch_result.component_names)
-            raise ValueError(
-                f"Component '{component_name}' not found. "
-                f"Available: {available}"
-            )
-        
-        component_id = component.item.id
+        component_id = component.item.id if component else None
         
         # Get ALL failed items for this launch
         all_failed, _ = await self.client.get_test_items(
@@ -212,27 +222,48 @@ class ComponentFetcher:
         # Filter failures that belong to this component
         component_failures = []
         component_name_lower = component_name.lower()
+        name_normalized = component_name_lower.replace("_", " ").replace("-", " ")
         
         for item in all_failed:
             matched = False
             
             # Check if direct parent is the component
-            if item.parent_id == component_id:
+            if component_id and item.parent_id == component_id:
                 matched = True
             
             # Check if item name contains component name
             if not matched and item.name:
-                if component_name_lower in item.name.lower():
+                item_lower = item.name.lower()
+                item_norm = item_lower.replace("_", " ").replace("-", " ")
+                if component_name_lower in item_lower or name_normalized in item_norm:
                     matched = True
             
             # Check path for component name
             if not matched and item.path_names:
                 path_str = str(item.path_names).lower()
-                if component_name_lower in path_str:
+                path_norm = path_str.replace("_", " ").replace("-", " ")
+                if component_name_lower in path_str or name_normalized in path_norm:
                     matched = True
             
             if matched:
                 component_failures.append(item)
+        
+        if not component_failures:
+            available = ", ".join(launch_result.component_names[:20])
+            raise ValueError(
+                f"No failures matching '{component_name}' found. "
+                f"Top-level components: {available}"
+            )
+        
+        if not component:
+            from src.infrastructure.reportportal.models import TestItem
+            virtual_item = TestItem(
+                id="virtual",
+                name=component_name,
+                type="SUITE",
+                status="FAILED",
+            )
+            component = Component(item=virtual_item, status="FAILED", children=[])
         
         # Fetch logs for component failures only
         failures_with_logs = []
@@ -434,45 +465,4 @@ async def fetch_component_logs(
             return await fetcher.get_all_component_failures(launch_id)
 
 
-def format_component_report(result: LaunchResult, show_logs: bool = True) -> str:
-    """Format a human-readable report of component failures."""
-    lines = []
-    lines.append("=" * 80)
-    lines.append(f"LAUNCH: {result.launch_name}")
-    lines.append(f"ID: {result.launch_id}")
-    lines.append(f"START TIME: {result.start_time}")
-    lines.append(f"STATUS: {result.status}")
-    lines.append("=" * 80)
-    lines.append("")
-    
-    lines.append(f"COMPONENTS ({len(result.components)}):")
-    lines.append("-" * 40)
-    for comp in result.components:
-        status_icon = "✗" if comp.status == "FAILED" else "✓"
-        lines.append(f"  {status_icon} {comp.name} [{comp.status}]")
-    lines.append("")
-    
-    # Show failures
-    failed_comps = [c for c in result.components if c.failures]
-    if failed_comps:
-        lines.append("FAILURES BY COMPONENT:")
-        lines.append("-" * 40)
-        
-        for comp in failed_comps:
-            lines.append(f"\n[{comp.name}] - {len(comp.failures)} failure(s)")
-            
-            for failure in comp.failures:
-                lines.append(f"\n  Test: {failure.test_item.name}")
-                lines.append(f"  ID: {failure.test_item.id}")
-                lines.append(f"  Type: {failure.test_item.type}")
-                
-                if show_logs and failure.logs:
-                    lines.append("  Logs:")
-                    log_preview = failure.combined_logs[:1000]
-                    for log_line in log_preview.split("\n")[:10]:
-                        lines.append(f"    {log_line}")
-                    if len(failure.combined_logs) > 1000:
-                        lines.append(f"    ... ({len(failure.combined_logs) - 1000} more chars)")
-    
-    return "\n".join(lines)
 

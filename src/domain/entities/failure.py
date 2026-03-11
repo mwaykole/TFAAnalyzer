@@ -22,7 +22,9 @@ class Failure:
     start_time: datetime | None = None
     end_time: datetime | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
-    
+    defect_type: str = ""
+    linked_issues: list[str] = field(default_factory=list)
+
     def __post_init__(self) -> None:
         if not self.id:
             raise ValueError("Failure ID cannot be empty")
@@ -52,6 +54,8 @@ class Failure:
             "status": self.status,
             "launch_id": self.launch_id,
             "component": self.component,
+            "defect_type": self.defect_type,
+            "linked_issues": self.linked_issues,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
         }
@@ -67,4 +71,6 @@ class Failure:
             launch_id=str(data.get("launch_id", "")),
             component=data.get("component", ""),
             test_code=data.get("test_code", ""),
+            defect_type=data.get("defect_type", ""),
+            linked_issues=data.get("linked_issues", []),
         )

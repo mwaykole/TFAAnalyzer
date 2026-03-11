@@ -1,31 +1,32 @@
-# ReportPortal Test Failure Analysis Service Configuration
+# TFA (Test Failure Analyzer) Configuration
 # Copy to config.yaml and update with your values
 
 reportportal:
   # ReportPortal server URL (without trailing slash)
+  # Can also be set via RP_URL env var
   url: https://reportportal.example.com
-  
+
   # Authentication: Use EITHER token OR username/password
   # Option 1: API token from ReportPortal (Profile -> API Keys)
   token: your-api-token-here
-  
-  # Option 2: Username and password
+
+  # Option 2: Username and password (or RP_USERNAME / RP_PASSWORD env vars)
   username: your-username
   password: your-password
-  
-  # Project name in ReportPortal
+
+  # Project name (or RP_PROJECT env var)
   project: my_project
   # Verify SSL certificates
   verify_ssl: true
 
 llm:
-  # LLM provider (anthropic)
+  # LLM provider: anthropic, groq, ollama (CLI --provider overrides this)
   provider: anthropic
   # Model to use for analysis
   model: claude-sonnet-4-20250514
   # Maximum tokens in response
   max_tokens: 4096
-  # Temperature for response generation (lower = more deterministic)
+  # Temperature (lower = more deterministic)
   temperature: 0.1
 
 analysis:
@@ -38,32 +39,54 @@ analysis:
   # Include fix recommendations in analysis
   include_recommendation: true
 
+# Test repository for fetching test source code (improves classification accuracy)
+test_repo:
+  enabled: false
+  # GitHub repository (owner/repo format)
+  repo: "opendatahub-io/opendatahub-tests"
+  branch: "main"
+  # Directory containing tests (relative to repo root)
+  test_dir: "tests"
+  # Local clone path (required for --verify mode, faster than GitHub API)
+  # local_path: /home/user/opendatahub-tests
+
+# Test verification — re-run failing tests on a live cluster
+verification:
+  # Seconds per test (0 = let the test's own timeout handle it)
+  timeout_per_test: 0
+  # Pass --collect-must-gather to pytest so must-gather is auto-collected
+  collect_must_gather: true
+
+# Must-gather analysis for OpenShift cluster state diagnostics
+must_gather:
+  enabled: false
+  # Base directory where must-gather artifacts are stored
+  # opendatahub-tests stores them in: must-gather-collected/<test-path>/
+  base_path: "must-gather-collected"
+  # Max container log lines to include per pod in LLM context
+  max_log_lines: 50
+  # Auto-map test names to per-test must-gather directories
+  auto_detect: true
+
+# Caching — avoids re-analyzing the same failure
+cache:
+  enabled: true
+  backend: memory        # or 'redis' for team server mode
+  # redis_url: redis://localhost:6379
+  ttl_seconds: 86400
+
+# Notifications — send analysis summaries to team channels
+notifications:
+  enabled: false
+  # slack_webhook: ""    # or set SLACK_WEBHOOK_URL env var
+  # teams_webhook: ""    # or set TEAMS_WEBHOOK_URL env var
+
 logging:
-  # Log level: DEBUG, INFO, WARNING, ERROR
   level: INFO
-  # Log format: json or console
-  format: json
+  format: json           # or 'console'
 
 retry:
-  # Maximum retry attempts for failed requests
   max_attempts: 3
-  # Base delay between retries (seconds)
   base_delay: 1.0
-  # Maximum delay between retries (seconds)
   max_delay: 30.0
-  # Exponential backoff base
   exponential_base: 2
-
-# Test repository for fetching test source code (improves classification accuracy)
-# This allows the analyzer to look at the actual test code to make better decisions
-test_repo:
-  # Enable test code fetching
-  enabled: false
-  # GitHub repository containing tests (owner/repo format)
-  repo: "red-hat-data-services/ods-ci"
-  # Branch to fetch from
-  branch: "master"
-  # Directory containing tests (relative to repo root)
-  test_dir: "ods_ci/tests"
-  # Optional: Local path to test repo (faster than GitHub API, useful for development)
-  # local_path: /home/user/ods-ci

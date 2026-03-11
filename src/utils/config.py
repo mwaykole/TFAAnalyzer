@@ -103,8 +103,9 @@ class NotificationConfig(BaseSettings):
 class VerificationConfig(BaseSettings):
     """Test verification configuration."""
 
-    timeout_per_test: int = Field(default=120, ge=30, le=600, description="Timeout per test in seconds")
-    max_parallel: int = Field(default=2, ge=1, le=5, description="Max parallel test runs")
+    timeout_per_test: int = Field(default=0, ge=0, le=7200, description="External timeout per test in seconds (0 = let the test's own timeout handle it)")
+    max_parallel: int = Field(default=1, ge=1, le=5, description="Max parallel test runs on the cluster (1 = sequential, avoids Gateway/resource conflicts)")
+    collect_must_gather: bool = Field(default=True, description="Collect must-gather artifacts on test failure")
     skip_on_low_confidence: bool = Field(default=True, description="Skip verification if confidence > 80%")
     confidence_threshold: float = Field(default=0.8, description="Skip verification above this confidence")
 
@@ -117,6 +118,15 @@ class CacheConfig(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
     ttl_seconds: int = Field(default=86400, ge=60, description="Cache TTL in seconds (24h default)")
     prefix: str = Field(default="tfa:", description="Cache key prefix")
+
+
+class MustGatherConfig(BaseSettings):
+    """Must-gather analysis configuration."""
+
+    enabled: bool = Field(default=False, description="Enable must-gather analysis")
+    base_path: str = Field(default="must-gather-collected", description="Base directory for must-gather artifacts")
+    max_log_lines: int = Field(default=50, ge=10, le=200, description="Max container log lines per pod")
+    auto_detect: bool = Field(default=True, description="Auto-map test names to per-test must-gather directories")
 
 
 class ClusterConfig(BaseSettings):
@@ -148,6 +158,7 @@ class Settings(BaseSettings):
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
+    must_gather: MustGatherConfig = Field(default_factory=MustGatherConfig)
     clusters: list[dict] = Field(default_factory=list, description="Multi-cluster configurations")
 
     # Direct environment variable overrides
@@ -236,6 +247,10 @@ class Settings(BaseSettings):
         return self.test_repo.enabled and (
             bool(self.test_repo.repo) or bool(self.test_repo.local_path)
         )
+    
+    def is_must_gather_enabled(self) -> bool:
+        """Check if must-gather analysis is enabled."""
+        return self.must_gather.enabled
 
 
 def load_yaml_config(config_path: Path) -> dict:
@@ -273,14 +288,19 @@ def create_settings(config_path: Path | None = None) -> Settings:
         if default_path.exists():
             config_data = load_yaml_config(default_path)
 
-    if "reportportal" not in config_data:
-        config_data["reportportal"] = {
-            "url": os.environ.get("RP_URL", ""),
-            "token": os.environ.get("RP_TOKEN", ""),
-            "username": os.environ.get("RP_USERNAME", ""),
-            "password": os.environ.get("RP_PASSWORD", ""),
-            "project": os.environ.get("RP_PROJECT", ""),
-        }
+    rp_defaults = {
+        "url": os.environ.get("RP_URL", ""),
+        "token": os.environ.get("RP_TOKEN", ""),
+        "username": os.environ.get("RP_USERNAME", ""),
+        "password": os.environ.get("RP_PASSWORD", ""),
+        "project": os.environ.get("RP_PROJECT", ""),
+    }
+    if "reportportal" in config_data:
+        for key, val in rp_defaults.items():
+            if val and key not in config_data["reportportal"]:
+                config_data["reportportal"][key] = val
+    else:
+        config_data["reportportal"] = rp_defaults
 
     return Settings(**config_data)
 

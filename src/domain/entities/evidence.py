@@ -42,6 +42,11 @@ class Evidence:
     timeout_analysis: str = ""   # Timeout verdict and recommendation
     systemic_issue: str = ""     # Detected systemic issue from clustering
     cluster_recommendation: str = ""  # Recommendation from cluster analysis
+    failed_on_setup: bool = False  # Test failed during setup phase, not test body
+    
+    # Must-gather fields
+    must_gather_context: str = ""  # Cluster state from must-gather analysis
+    cluster_health: str = ""       # "healthy", "degraded", "critical", "warning"
     
     @property
     def has_strong_evidence(self) -> bool:
@@ -107,6 +112,8 @@ class Evidence:
             result["timeout_analysis"] = self.timeout_analysis
         if self.systemic_issue:
             result["systemic_issue"] = self.systemic_issue
+        if self.cluster_health:
+            result["cluster_health"] = self.cluster_health
         
         return result
     
@@ -129,6 +136,8 @@ class Evidence:
             parts.append(f"⚠️ Systemic: {self.systemic_issue[:30]}")
         if self.timeout_analysis:
             parts.append(f"⏱️ Timeout: {self.timeout_analysis[:30]}")
+        if self.cluster_health and self.cluster_health not in ("healthy", ""):
+            parts.append(f"Cluster: {self.cluster_health}")
         
         return " | ".join(parts) if parts else "No strong evidence"
     

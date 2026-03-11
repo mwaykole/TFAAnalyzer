@@ -59,10 +59,34 @@ class RPRepository(FailureRepository, HistoryRepository):
                 return None
             
             logs = await self._client.get_item_logs(test_id)
+            relevant_levels = {"ERROR", "WARN", "INFO", "FATAL"}
             combined_logs = "\n".join(
-                log.get("message", "") for log in logs if log.get("level") == "ERROR"
+                f"[{log.get('level', 'INFO')}] {log.get('message', '')}"
+                for log in logs if log.get("level") in relevant_levels
             )
-            
+            # Fetch nested step logs for richer context
+            nested_steps = await self._client.get_nested_step_logs(test_id)
+            if nested_steps:
+                step_context = []
+                for step in nested_steps:
+                    status_marker = "FAILED" if step["status"] == "FAILED" else step["status"]
+                    step_context.append(f"\n--- Step: {step['name']} [{status_marker}] ---")
+                    if step["logs"]:
+                        step_context.append(step["logs"][:500])
+                combined_logs += "\n".join(step_context)
+            issue = item.get("issue") or {}
+            defect_type = ""
+            linked_issues: list[str] = []
+            if issue:
+                issue_type = issue.get("issueType", "")
+                defect_type = issue.get("comment", "") or issue_type
+                for ext in issue.get("externalSystemIssues", []):
+                    url = ext.get("url", "")
+                    ticket_id = ext.get("ticketId", "")
+                    if url:
+                        linked_issues.append(url)
+                    elif ticket_id:
+                        linked_issues.append(ticket_id)
             return Failure(
                 id=str(item.get("id", test_id)),
                 test_name=item.get("name", ""),
@@ -70,6 +94,8 @@ class RPRepository(FailureRepository, HistoryRepository):
                 status=item.get("status", "FAILED"),
                 launch_id=launch_id,
                 component=self._extract_component(item),
+                defect_type=defect_type,
+                linked_issues=linked_issues,
             )
         except Exception:
             return None
@@ -109,8 +135,10 @@ class RPRepository(FailureRepository, HistoryRepository):
     async def get_failure_logs(self, test_id: str) -> str:
         """Get logs for a specific test."""
         logs = await self._client.get_item_logs(test_id)
+        relevant_levels = {"ERROR", "WARN", "INFO", "FATAL"}
         return "\n".join(
-            log.get("message", "") for log in logs if log.get("level") == "ERROR"
+            f"[{log.get('level', 'INFO')}] {log.get('message', '')}"
+            for log in logs if log.get("level") in relevant_levels
         )
     
     async def save_classification(
@@ -221,6 +249,82 @@ class RPRepository(FailureRepository, HistoryRepository):
         """Save analysis result to history (via RP comment)."""
         return 0
     
+    async def get_launch_failure_summary(
+        self, launch_id: str, sample_size: int = 20,
+    ) -> dict[str, Any]:
+        """Sample failures across the entire launch for cross-component patterns."""
+        from src.infrastructure.reportportal.models import TestStatus
+        import asyncio
+
+        try:
+            items, paged = await self._client.get_test_items(
+                launch_id=launch_id,
+                status=TestStatus.FAILED,
+                page=0,
+                size=sample_size,
+            )
+        except Exception:
+            return {}
+
+        total_failed = paged.total_elements
+        total_items = 0
+        try:
+            _, all_paged = await self._client.get_test_items(
+                launch_id=launch_id, page=0, size=1,
+            )
+            total_items = all_paged.total_elements
+        except Exception:
+            pass
+
+        setup_timeout_count = 0
+        login_failure_count = 0
+        sample_errors: list[str] = []
+
+        async def _check_item(item):
+            nonlocal setup_timeout_count, login_failure_count
+            try:
+                logs_list, _ = await self._client.get_logs(
+                    str(item.id), page=0, size=3,
+                )
+                text = " ".join(
+                    getattr(log, "message", "") or "" for log in logs_list
+                )
+            except Exception:
+                text = ""
+            text_lower = text.lower()
+            if "failed on setup" in text_lower and "timeout" in text_lower:
+                setup_timeout_count += 1
+            if any(kw in text_lower for kw in (
+                "login fail", "log into the application",
+                "authentication fail", "unauthorized",
+                "forbidden", "403", "401",
+                "connection refused", "could not connect",
+            )):
+                login_failure_count += 1
+            if text.strip() and len(sample_errors) < 8:
+                sample_errors.append(text[:200])
+
+        await asyncio.gather(*(_check_item(it) for it in items))
+
+        failure_rate = total_failed / total_items if total_items else 0
+        if failure_rate >= 0.15 or login_failure_count >= 3:
+            launch_health = "degraded"
+        elif setup_timeout_count >= len(items) * 0.5:
+            launch_health = "degraded"
+        else:
+            launch_health = "unknown"
+
+        return {
+            "total_items": total_items,
+            "total_failed": total_failed,
+            "failure_rate": round(failure_rate, 3),
+            "setup_timeout_count": setup_timeout_count,
+            "login_failure_count": login_failure_count,
+            "sample_size": len(items),
+            "sample_errors": sample_errors,
+            "launch_health": launch_health,
+        }
+
     def _extract_component(self, item: dict) -> str:
         """Extract component from test item path."""
         path = item.get("path", "") or ""

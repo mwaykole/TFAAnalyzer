@@ -144,6 +144,7 @@ Deep investigation using Thinker-Critic LLM pattern with optional verification.
 | provider | string | No | LLM provider (default: anthropic) |
 | verify_mode | string | No | none, run, analyze-history |
 | verify_tests | boolean | No | Legacy: run test verification |
+| must_gather_path | string | No | Path to must-gather artifacts for cluster state analysis |
 
 **Verify Modes**
 

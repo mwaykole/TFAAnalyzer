@@ -14,8 +14,8 @@ Thank you for your interest in contributing to the Test Failure Analyzer!
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/rp-tfa-analysis.git
-cd rp-tfa-analysis
+git clone https://github.com/opendatahub-io/TFAAnalyzer.git
+cd TFAAnalyzer
 
 # Create virtual environment
 python -m venv .venv
